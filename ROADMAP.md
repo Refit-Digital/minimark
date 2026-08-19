@@ -162,24 +162,26 @@ titled "lost my file". All are small, contained fixes.
       `minimark.swift:919`. Try UTF-8, then UTF-16 with BOM, then Latin-1, and
       if all fail refuse to open rather than mangling. If a file only decoded
       lossily, open it read-only and say so in the status bar.
-- [ ] **Autosave alert storm.** `runAutosave` at `:1073` guards the `fetchText`
-      failure but then calls `write` at `:928`, which pops a modal sheet on any
-      error. `presentError` uses `beginSheetModal`, so these queue rather than
-      coalesce. Give `write` a silent variant for the autosave path, count
-      consecutive failures, and surface one non-modal warning after the third.
-- [ ] **`confirmDiscard` can silently no-op.** At `:1014` it calls
-      `beginSheetModal(for: window)` with no visibility check, so if the window
-      is off screen the completion never runs and New, Open, Open Recent and
-      drag-open all quietly do nothing. `finishTerminate` already guards for
-      exactly this at `:561`. Apply the same guard to the other call sites:
-      `:1425`, `:1435`, `:1518`, `:608`, `:1377`, plus `saveAs` `:995`,
-      `checkFileOnDisk` `:1113`, `menuRename` `:1563`, `menuExportHTML` `:1581`,
-      `menuPageSetup` `:1635`, `menuExportPDF` `:1654`.
+- [~] **Autosave alert storm.** Half done: `write` now takes `silent:` and
+      autosave passes it, so the sheet storm is gone. The counting and the one
+      warning after the third failure are still to do — as it stands an
+      unwritable file fails quietly, which is better than an alert a second but
+      still not good enough.
+- [~] **`confirmDiscard` can silently no-op.** Mostly gone, and mostly by
+      deletion. New, Open, Open Recent and drag-open no longer discard anything
+      — they open into a tab — so they no longer call it at all. What is left
+      of it is the close and quit paths, and the sheet inside `confirmClose`
+      now guards on `window.isVisible` the way `finishTerminate` always did.
+      Still to check: `menuExportHTML`, `menuPageSetup` and `menuExportPDF`,
+      which present their own panels with no such guard.
 - [ ] **No crash recovery for never-saved documents.** Autosave is skipped when
-      there is no path (`:1067`), and the only backstop snapshots at most once
-      per 20 seconds and flushes after 20 seconds idle. Write untitled documents
-      to `~/Library/Application Support/minimark/unsaved/` on the same debounce
-      and offer to restore on next launch.
+      there is no path, and the only backstop snapshots at most once per 20
+      seconds and flushes after 20 seconds idle. Write untitled documents to
+      `~/Library/Application Support/minimark/unsaved/` on the same debounce and
+      offer to restore on next launch. **Now more pressing than it was:** tabs
+      make it easy to have several untitled documents open at once, and session
+      restore deliberately drops them because there is nowhere to put their
+      text. This is the thing that would fix that properly.
 - [ ] **Rename sanitisation.** `renameDocument` at `:1034` strips `/` and `:`
       but not a leading dot, so renaming to `.notes` makes the file vanish from
       Finder with no warning.
@@ -252,12 +254,11 @@ value.
 
 ### Tests, because they are now contributor infrastructure
 
-- [ ] **Bridge contract test.** Nothing currently checks that a JS `send()` type
-      has a matching Swift `case`, or that a `js("App.x(...)")` names a function
-      that exists. Both directions are string-matched at runtime only. A script
-      that greps both sides and diffs the sets is maybe fifty lines and is the
-      cheapest high-value test available. It also protects contributors from the
-      easiest mistake to make in this codebase.
+- [x] **Bridge contract test.** Done: `tools/bridge-contract.js`. Diffs `send()`
+      types against the Swift `case`s, `js("App.x(...)")` against the keys of
+      `window.App`, persisted pref keys against `kPrefKeys`, and menu command
+      names against the command map. Exits non-zero on a mismatch, so it drops
+      straight into the CI job in Phase 2.
 - [ ] **Sanitiser tests.** The allowlist walk at `app.js:310-400` is
       security-critical, carries a comment block enumerating three specific ways
       the previous regex version was bypassed, and has no tests at all. For a
@@ -307,12 +308,23 @@ value.
    controls.
 4. **Mermaid diagrams.** KaTeX is already wired in at `app.js:287`, so the
    pattern for a block-level renderer exists.
-5. **Multiple windows and tabs.** The biggest gap against every competitor, and
-   the biggest job. `AppDelegate` holds a single `var window: MainWindow!` at
-   `:416` and sets `tabbingMode = .disallowed` at `:596`. Document state lives
-   on the app delegate and would have to move into a per-window controller.
-   Budget two weeks on its own, not three days. Do not start this inside the six
-   weeks.
+5. ~~**Multiple windows and tabs.**~~ **Tabs: done, August 2026.** One window,
+   several documents, in a strip that stays off screen until the pointer
+   reaches the top edge of the window. The shape it took is written up in
+   `NATIVE-SHELL-BRIEF.md`: the shell owns the tabs because it owns the files,
+   the web layer owns a session per tab, and the two meet at an id. Document
+   state moved off the app delegate into a `DocTab` list, which is the refactor
+   this entry was really asking for.
+
+   Two tools came with it and are the check that it stays working:
+   `tools/bridge-contract.js` diffs every message and call across the bridge in
+   both directions, and `tools/tabs-test.js` drives the real web layer in a
+   headless browser against a stand-in shell.
+
+   Multiple *windows* is still open, and is now the smaller job of the two:
+   `AppDelegate` still holds a single `var window: MainWindow!` and still sets
+   `tabbingMode = .disallowed`. It would want a per-window controller holding
+   the tab list, which is now a contained thing to move.
 
 Items 1 to 4 are also the natural "good first issue" set if anyone turns up
 wanting to contribute.
@@ -346,7 +358,7 @@ the project gets enough users that manual updating becomes a real complaint.
 | The ad-hoc signature gets dropped from `build.sh` as tidy-up | It is load-bearing. Unsigned apps do not open at all on macOS 15.1+. Leave a comment in the script saying so |
 | A contributor lands a patch and the licence is now frozen | Decide on a CLA, or consciously accept that GPL-3.0 is permanent, before merging the first pull request |
 | The repo goes public with a broken build | CI in Phase 2 is what prevents this. Until it exists, test a clean clone by hand before tagging |
-| Tabs refactor gets started and swallows everything | It is explicitly deferred past week 6 |
+| ~~Tabs refactor gets started and swallows everything~~ | Done, and contained: it did not touch the markdown pipeline, the sanitiser or the history store. The risk it was guarding against was document state living on the app delegate, and that is now a `DocTab` list |
 | Nobody turns up | That is a fine outcome. The app is for you first, and a finished, documented, tested native Mac app is worth having regardless of stars |
 
 ---

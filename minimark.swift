@@ -49,6 +49,24 @@ let kTrafficInset: CGFloat = kBarPad
 // up by one small patch is a window you fumble. This strip is invisible and
 // costs the document almost nothing.
 let kEdgeGrip: CGFloat = 8
+
+// The tab strip lives off the top of the window and comes down when the
+// pointer reaches the edge. Noticing that has to happen here rather than in
+// the page: the top kEdgeGrip pixels belong to a real drag strip that takes
+// the mouse before the web view ever sees it, so a mousemove listener in the
+// page would be watching a band it is largely blind to.
+//
+// Two heights, because the band has to be small enough not to fire on the way
+// past and large enough, once the strip is out, to still contain a pointer
+// that has moved down onto a tab.
+let kPeekBand: CGFloat = 16
+let kPeekBandOpen: CGFloat = kBarHeight + 14
+
+// How many documents a session will reopen. A cap rather than a limit: it is
+// there so a stored session that has somehow grown absurd cannot turn a launch
+// into a minute of file reads, not because more tabs are refused.
+let kMaxRestoredTabs = 24
+
 let kAutosaveDelay: TimeInterval = 1.0
 let kWatchInterval: TimeInterval = 2.0
 // How long quit waits on the web layer before giving up and going anyway.
@@ -69,10 +87,19 @@ let kImageExtensions = ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif",
 /// file — see HistoryStore. The key is left in kLegacyHistoryKey only so an
 /// existing install can be migrated off it once, on first launch.
 let kPrefKeys = ["theme", "themeAuto", "themeLight", "themeDark", "font", "size",
-                 "zen", "focus", "typewriter", "mode", "scroll", "fmtUse"]
+                 "zen", "focus", "typewriter", "mode", "scroll", "fmtUse", "tabsPin"]
 
 let kLegacyHistoryKey = "history"
 let kLastDocKey = "lastDocumentPath"
+
+/// The open documents, as paths, and which of them was in front. Untitled
+/// documents are deliberately not in here: there is nowhere to put their text,
+/// and reopening an empty tab where a page of writing used to be is worse than
+/// not reopening it at all. kLastDocKey is still written alongside so a
+/// downgrade to a single-document build finds something it understands.
+let kOpenDocsKey = "openDocumentPaths"
+let kActiveDocKey = "activeDocumentIndex"
+
 let kFrameName = "minimarkMainWindow"
 
 // ============================================================================
@@ -351,6 +378,83 @@ final class DragStrip: NSView {
 }
 
 // ============================================================================
+// The peek probe
+//
+// A view that never takes a click and never draws anything. All it does is
+// notice the pointer arriving in the band along the top of the window, so the
+// web layer can bring the tab strip down.
+//
+// It has to exist because the two DragStrips above the web view swallow the
+// mouse over exactly the pixels the gesture starts in, and because a tracking
+// area is geometry, not hit testing: it reports the pointer whether or not the
+// view under it would ever accept a click. That is the whole trick — this sits
+// on top of everything and changes nothing about who gets the clicks.
+// ============================================================================
+
+final class PeekProbe: NSView {
+
+    var onChange: ((Bool) -> Void)?
+
+    override var isOpaque: Bool { false }
+    override var acceptsFirstResponder: Bool { false }
+
+    /// Unconditionally transparent to the mouse. The drag strips and the
+    /// document underneath keep every event they had before this existed.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    private var area: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let old = area { removeTrackingArea(old) }
+        // .inVisibleRect keeps it correct through every resize and through the
+        // band growing when the strip opens, without recomputing a rectangle
+        // here that AppKit already knows.
+        let fresh = NSTrackingArea(rect: bounds,
+                                   options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                                   owner: self, userInfo: nil)
+        addTrackingArea(fresh)
+        area = fresh
+    }
+
+    override func mouseEntered(with event: NSEvent) { onChange?(true) }
+    override func mouseExited(with event: NSEvent)  { onChange?(false) }
+}
+
+// ============================================================================
+// An open document
+//
+// The shell owns the tabs because it owns the files: the path, the dirty flag,
+// the modification date the watcher compares against, and the autosave that
+// runs whether or not the document is the one on screen.
+//
+// What it deliberately does not own is the text. That lives in the web layer,
+// one session per tab, along with the undo stacks and the scroll positions —
+// the things that make coming back to a tab feel like not having left it, and
+// the things that would cost megabytes to ship across the bridge on every
+// switch. The two halves meet at `id` and nothing else.
+// ============================================================================
+
+final class DocTab {
+    let id: Int
+    var url: URL?
+    var dirty = false
+    var mtime: Date?
+    /// Only used while the document has no path of its own.
+    var placeholder: String
+
+    init(id: Int, url: URL?, placeholder: String = "Untitled.md") {
+        self.id = id
+        self.url = url
+        self.placeholder = placeholder
+        self.mtime = url.flatMap(modificationDate)
+    }
+
+    var name: String { url?.lastPathComponent ?? placeholder }
+    var dir: String { url?.deletingLastPathComponent().path ?? "" }
+}
+
+// ============================================================================
 // Root container — reports system appearance changes
 // ============================================================================
 
@@ -421,13 +525,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     var stripW: NSLayoutConstraint!  // and resizes it, since the two modes differ
     var stripH: NSLayoutConstraint!
 
-    var docURL: URL?
+    var probe: PeekProbe!            // notices the pointer at the top edge
+    var probeH: NSLayoutConstraint!  // …over a band that grows once tabs show
+    var rest: DragStrip!             // the empty run past the last tab
+    var restX: NSLayoutConstraint!
+    var restW: NSLayoutConstraint!
+    var restH: NSLayoutConstraint!
+
+    // ------------------------------------------------------------------
+    // The open documents
+    //
+    // One window, several documents. `tabs` is the order they appear in the
+    // strip, `activeID` is the one on screen, and the three computed
+    // properties below are what everything written before tabs existed still
+    // talks to — the active tab is simply where "the document" now lives.
+    // ------------------------------------------------------------------
+
+    var tabs: [DocTab] = []
+    var activeID = 0
+    private var nextTabID = 1
+
+    var activeTab: DocTab? { tabs.first { $0.id == activeID } }
+    func tab(_ id: Int) -> DocTab? { tabs.first { $0.id == id } }
+
+    var docURL: URL? {
+        get { activeTab?.url }
+        set { activeTab?.url = newValue }
+    }
+    var docDirty: Bool {
+        get { activeTab?.dirty ?? false }
+        set { activeTab?.dirty = newValue }
+    }
+    var lastMTime: Date? {
+        get { activeTab?.mtime }
+        set { activeTab?.mtime = newValue }
+    }
+
     var recentMenu: NSMenu!
-    var docDirty = false
     var webReady = false
     var pendingOpen: URL?
+    var pendingExtra: [URL] = []
 
-    var lastMTime: Date?
     var watchTimer: Timer?
     var autosaveWork: DispatchWorkItem?
     var reloadPromptUp = false
@@ -438,6 +576,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     var zenOn = false
     var zenRevealed = false
+    var tabsShowing = false
 
     // ------------------------------------------------------------------
     // Launch
@@ -456,15 +595,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     /// Open-with and drag-onto-icon. May arrive before the web layer is ready.
     func application(_ sender: NSApplication, openFiles filenames: [String]) {
-        if let first = filenames.first {
-            let url = URL(fileURLWithPath: first)
-            if webReady { openDocument(at: url) } else { pendingOpen = url }
+        // All of them now, each into its own tab. Selecting six files in Finder
+        // and pressing Return used to open one and silently drop five.
+        let urls = filenames.map { URL(fileURLWithPath: $0) }
+        if webReady {
+            for url in urls { openDocument(at: url) }
+            if !urls.isEmpty { command("showTabs") }
+        } else if let first = urls.first {
+            pendingOpen = first
+            // Anything past the first has to wait for the web layer, which is
+            // moments away. handleReady takes pendingOpen and this takes the
+            // rest, in order, once there is somewhere to put them.
+            pendingExtra.append(contentsOf: urls.dropFirst())
         }
         sender.reply(toOpenOrPrint: .success)
     }
 
     func applicationDidResignActive(_ note: Notification) {
-        if docURL != nil && docDirty { runAutosave() }
+        if tabs.contains(where: { $0.dirty && $0.url != nil }) { runAutosave() }
         // Switching away is the cheapest moment there is to bank history:
         // nobody is typing, and the write is off the main thread anyway.
         commitHistory()
@@ -492,7 +640,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         // finishTerminate can reply to it.
         guard webReady else {
             history.flush()
-            if !docDirty { terminating = false; return .terminateNow }
+            if !tabs.contains(where: { $0.dirty }) { terminating = false; return .terminateNow }
             DispatchQueue.main.async { self.finishTerminate() }
             return .terminateLater
         }
@@ -533,36 +681,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     private func finishTerminate() {
-        guard docDirty else {
+        let dirty = tabs.filter { $0.dirty }
+        guard !dirty.isEmpty else {
             replyToTerminate(true)
             return
         }
-        if let url = docURL {
-            // It has somewhere to go: just save it, the same as autosave would.
-            // If the web layer cannot produce the text, quit without writing
-            // rather than replacing the file with nothing. Same watchdog
-            // reasoning as the history fetch: this round trip can be lost with
-            // the WebContent process, and nothing else would ever reply.
-            fetchText { text in
-                if let text = text { self.write(text, to: url) }
-                self.replyToTerminate(true)
+
+        // Anything with a path is simply written, the same as the autosave a
+        // second later would have. Only a document that has never been saved
+        // has anything left to decide, so only those get asked about.
+        let onDisk = dirty.filter { $0.url != nil }
+        let untitled = dirty.filter { $0.url == nil }
+
+        let group = DispatchGroup()
+        var failed: [String] = []
+
+        for tab in onDisk {
+            guard let url = tab.url else { continue }
+            group.enter()
+            var settled = false
+            let finish: (Bool) -> Void = { wrote in
+                if settled { return }
+                settled = true
+                if !wrote { failed.append(url.lastPathComponent) }
+                group.leave()
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + kQuitTimeout) {
-                self.replyToTerminate(true)
+            // If the web layer cannot produce the text, leave the file as it
+            // is rather than replacing it with nothing — and say so, rather
+            // than quitting quietly over the top of the loss.
+            fetchText(tab.id) { text in
+                guard let text = text else { finish(false); return }
+                finish(self.write(text, to: url, silent: true))
             }
-            return
+            // Same watchdog reasoning as the history fetch: this round trip
+            // goes through the WebContent process, and if that is killed
+            // mid-quit nothing else would ever reply.
+            DispatchQueue.main.asyncAfter(deadline: .now() + kQuitTimeout) { finish(false) }
         }
-        // Never saved and there is something in it: ask. A sheet needs a window
-        // that is actually on screen — without one beginSheetModal never
-        // presents and its completion never runs, which would leave the quit
-        // hanging on a reply that can no longer come. No watchdog here: this one
-        // is waiting on a person, and quitting out from under them would be
-        // exactly the data loss the prompt exists to prevent.
-        guard window?.isVisible == true else {
-            replyToTerminate(true)
-            return
+
+        group.notify(queue: .main) {
+            // Silent writes above, one honest alert here. Quitting over the top
+            // of a file that could not be written is the one outcome worth
+            // interrupting a quit for.
+            if !failed.isEmpty {
+                let alert = NSAlert()
+                alert.messageText = failed.count == 1
+                    ? "Could not save “\(failed[0])”"
+                    : "Could not save \(failed.count) documents"
+                alert.informativeText = "minimark has stopped quitting so the changes are not lost. "
+                    + "Check the folder is still available, then try again."
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+                self.replyToTerminate(false)
+                return
+            }
+
+            guard !untitled.isEmpty else { self.replyToTerminate(true); return }
+
+            // Never saved and there is something in them: ask, one at a time.
+            // A sheet needs a window that is actually on screen — without one
+            // beginSheetModal never presents and its completion never runs,
+            // which would leave the quit hanging on a reply that can no longer
+            // come. No watchdog on this one: it is waiting on a person, and
+            // quitting out from under them is the data loss it exists to stop.
+            guard self.window?.isVisible == true else { self.replyToTerminate(true); return }
+
+            var queue = untitled
+            func step() {
+                guard !queue.isEmpty else { self.replyToTerminate(true); return }
+                let next = queue.removeFirst()
+                self.confirmClose(next) { ok in
+                    guard ok else { self.replyToTerminate(false); return }
+                    step()
+                }
+            }
+            step()
         }
-        confirmDiscard { ok in self.replyToTerminate(ok) }
     }
 
     /// Ask the web layer for its history now, rather than waiting for its idle
@@ -604,9 +798,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
         let v = EditorWebView(frame: .zero, configuration: cfg)
         v.onImageFiles = { [weak self] urls, at in self?.importImages(urls, at: at) }
-        v.onDocumentFile = { [weak self] url in
-            self?.confirmDiscard { ok in if ok { self?.openDocument(at: url) } }
-        }
+        // Dropped documents join the session rather than replacing what is
+        // open, so there is nothing to ask about before taking one.
+        v.onDocumentFile = { [weak self] url in self?.openDocument(at: url) }
         // Deliberately no registerForDraggedTypes: it *replaces* the type list
         // rather than adding to it, and WKWebView registers a large one at init
         // (text, RTF, web archives, promised files). Narrowing it to .fileURL
@@ -635,17 +829,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         // only pick up by one 103px patch is a window you fumble.
         let s = DragStrip()
         let e = DragStrip()
+        // A third, for the empty run past the last tab once the strip is out.
+        // Dragging a window by the blank part of its tab bar is muscle memory
+        // everywhere else, and the web layer cannot move its own window.
+        let r = DragStrip()
+        r.isHidden = true
+        let p = PeekProbe()
         v.translatesAutoresizingMaskIntoConstraints = false
         s.translatesAutoresizingMaskIntoConstraints = false
         e.translatesAutoresizingMaskIntoConstraints = false
+        r.translatesAutoresizingMaskIntoConstraints = false
+        p.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(v)
         root.addSubview(s, positioned: .above, relativeTo: v)
         root.addSubview(e, positioned: .above, relativeTo: v)
+        root.addSubview(r, positioned: .above, relativeTo: e)
+        // Topmost, so nothing can shadow its tracking area. It takes no clicks
+        // either way — hitTest returns nil — so being on top costs nothing.
+        root.addSubview(p, positioned: .above, relativeTo: r)
 
         let sx = s.leadingAnchor.constraint(equalTo: root.leadingAnchor,
                                             constant: kTrafficInset - kBarPad)
         let sw = s.widthAnchor.constraint(equalToConstant: kBarWidth)
         let sh = s.heightAnchor.constraint(equalToConstant: kBarHeight)
+
+        let rx = r.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 0)
+        let rw = r.widthAnchor.constraint(equalToConstant: 0)
+        let rh = r.heightAnchor.constraint(equalToConstant: kBarHeight)
+        let ph = p.heightAnchor.constraint(equalToConstant: kPeekBand)
 
         NSLayoutConstraint.activate([
             v.leadingAnchor.constraint(equalTo: root.leadingAnchor),
@@ -659,16 +870,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             e.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             e.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             e.topAnchor.constraint(equalTo: root.topAnchor),
-            e.heightAnchor.constraint(equalToConstant: kEdgeGrip)
+            e.heightAnchor.constraint(equalToConstant: kEdgeGrip),
+
+            rx, rw, rh,
+            r.topAnchor.constraint(equalTo: root.topAnchor),
+
+            p.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            p.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            p.topAnchor.constraint(equalTo: root.topAnchor),
+            ph
         ])
+
+        p.onChange = { [weak self] inside in self?.reportPeek(inside) }
 
         self.window = w
         self.web = v
         self.strip = s
         self.edge = e
+        self.rest = r
+        self.probe = p
         self.stripX = sx
         self.stripW = sw
         self.stripH = sh
+        self.restX = rx
+        self.restW = rw
+        self.restH = rh
+        self.probeH = ph
 
         let hadSavedFrame = UserDefaults.standard.string(forKey: "NSWindow Frame \(kFrameName)") != nil
         _ = w.setFrameAutosaveName(kFrameName)
@@ -718,8 +945,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     /// string is a legitimate answer for an empty document; a failure is not
     /// an answer at all, and the only safe response is to leave the file
     /// alone.
-    func fetchText(_ done: @escaping (String?) -> Void) {
-        web.evaluateJavaScript("window.App?App.getText():null") { result, error in
+    /// With an id, the text of any open tab — autosave runs against every
+    /// dirty document, not only the one on screen. The web layer answers null
+    /// for a tab it does not have, which lands here as the same "could not
+    /// read it" that a thrown getText does, and is treated the same way.
+    func fetchText(_ id: Int? = nil, _ done: @escaping (String?) -> Void) {
+        let arg = id.map(String.init) ?? ""
+        web.evaluateJavaScript("window.App?App.getText(\(arg)):null") { result, error in
             if error != nil { done(nil); return }
             done(result as? String)
         }
@@ -767,9 +999,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         js("if(window.App)App.setSystemTheme(\(jsLiteral(dark ? "dark" : "light")))")
     }
 
-    func pushSaved(_ url: URL) {
+    func pushSaved(_ url: URL, tab: DocTab? = nil) {
+        let id = (tab ?? activeTab)?.id ?? activeID
         js("if(window.App)App.setSaved(\(jsLiteral(url.lastPathComponent))," +
-           "\(jsLiteral(url.deletingLastPathComponent().path)))")
+           "\(jsLiteral(url.deletingLastPathComponent().path)),\(id))")
+    }
+
+    /// The whole tab list. Sent on every change rather than diffed: it is a
+    /// handful of short strings, and one reconciliation path on the far side
+    /// is worth more than the bytes a patch would save.
+    func pushTabs() {
+        guard webReady else { return }
+        let rows: [[String: Any]] = tabs.map { t in
+            ["id": t.id, "name": t.name, "dir": t.dir,
+             "dirty": t.dirty, "active": t.id == activeID]
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: rows, options: []),
+              let json = String(data: data, encoding: .utf8) else { return }
+        js("if(window.App&&App.setTabs)App.setTabs(\(json))")
+    }
+
+    /// The pointer has arrived at, or left, the top edge of the window.
+    func reportPeek(_ inside: Bool) {
+        guard webReady else { return }
+        js("if(window.App&&App.setPeek)App.setPeek(\(inside ? "true" : "false"))")
     }
 
     // ------------------------------------------------------------------
@@ -799,9 +1052,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
         case "dirty":
             let dirty = (body["dirty"] as? Bool) ?? false
-            docDirty = dirty
-            window?.isDocumentEdited = dirty
+            // Filed against the tab it came from, not against whichever is in
+            // front. Only the document on screen can be edited, so in practice
+            // they are the same, but a message in flight while a tab switch
+            // lands would otherwise mark the wrong document.
+            let target = (body["id"] as? Int).flatMap { tab($0) } ?? activeTab
+            target?.dirty = dirty
+            window?.isDocumentEdited = tabs.contains { $0.dirty }
             if dirty { scheduleAutosave() }
+            // No pushTabs here. The strip flips its own dot as the key is
+            // pressed; sending the whole list back would rebuild every tab
+            // node twice a second for a change the far side has already made.
+
+        case "tabNew":
+            newTab()
+
+        case "tabSelect":
+            if let id = body["id"] as? Int { activate(id) }
+
+        case "tabClose":
+            if let id = body["id"] as? Int { closeTab(id) }
+
+        case "tabMove":
+            if let id = body["id"] as? Int, let to = body["to"] as? Int { moveTab(id, to: to) }
+
+        case "tabsOpen":
+            tabsShowing = (body["on"] as? Bool) ?? false
+            // The band the probe watches grows with the strip, so a pointer
+            // that has moved down onto a tab is still "at the top edge" and
+            // the strip does not shut under it.
+            probeH?.constant = tabsShowing ? kPeekBandOpen : kPeekBand
+            // Applied now rather than next run loop turn: the pointer is
+            // already inside the old band and the new one has to contain it
+            // before the strip finishes sliding, or the exit fires under it.
+            window?.contentView?.layoutSubtreeIfNeeded()
+            applyChrome()
+
+        case "tabDrag":
+            // Where the empty run past the last tab is, so the drag region can
+            // be parked exactly over it. Zero width means there is none.
+            let x = (body["x"] as? Double) ?? 0
+            let w = (body["w"] as? Double) ?? 0
+            let h = (body["h"] as? Double) ?? Double(kBarHeight)
+            restX?.constant = CGFloat(x).rounded()
+            restW?.constant = max(0, CGFloat(w).rounded())
+            restH?.constant = max(0, CGFloat(h).rounded())
+            applyChrome()
 
         case "menu":
             if let name = body["name"] as? String { runMenuAction(name) }
@@ -883,37 +1179,241 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
         if let url = pendingOpen {
             pendingOpen = nil
+            // A document arriving with the launch replaces the session rather
+            // than joining it: double-clicking a file in Finder means "show me
+            // this", not "show me this and the nine things I had open".
+            tabs = [makeTab(url: nil)]
+            activeID = tabs[0].id
             openDocument(at: url)
+            let extra = pendingExtra
+            pendingExtra = []
+            for other in extra { openDocument(at: other) }
+            if !extra.isEmpty { activate(tabs[0].id) }
             return
         }
-        if let path = UserDefaults.standard.string(forKey: kLastDocKey),
-           FileManager.default.isReadableFile(atPath: path) {
-            openDocument(at: URL(fileURLWithPath: path))
-            return
-        }
+
+        if restoreSession() { return }
+
         // Nothing to restore. Leave the welcome document the web layer has
-        // already put on screen — loadDoc with empty text would wipe it.
+        // already put on screen — loadDoc with empty text would wipe it — and
+        // give it a tab to sit in. The web layer adopts what is on screen into
+        // that tab rather than blanking it.
+        tabs = [makeTab(url: nil)]
+        activeID = tabs[0].id
+        pushTabs()
+        syncWindowToTab()
+    }
+
+    // ------------------------------------------------------------------
+    // Tabs
+    // ------------------------------------------------------------------
+
+    func makeTab(url: URL?) -> DocTab {
+        let tab = DocTab(id: nextTabID, url: url, placeholder: freeUntitledName())
+        nextTabID += 1
+        return tab
+    }
+
+    /// Untitled.md, then Untitled 2.md, and so on. Three tabs all called
+    /// Untitled.md is a strip you cannot read.
+    func freeUntitledName() -> String {
+        let taken = Set(tabs.filter { $0.url == nil }.map { $0.placeholder })
+        if !taken.contains("Untitled.md") { return "Untitled.md" }
+        var n = 2
+        while taken.contains("Untitled \(n).md") { n += 1 }
+        return "Untitled \(n).md"
+    }
+
+    /// Bring a tab to the front. Safe to call for the tab already in front:
+    /// the web layer reconciles rather than reloading, so nothing is disturbed.
+    func activate(_ id: Int) {
+        guard tab(id) != nil else { return }
+        activeID = id
+        syncWindowToTab()
+        pushTabs()
+        saveSession()
+    }
+
+    /// The window furniture that follows whichever document is in front.
+    func syncWindowToTab() {
+        let url = activeTab?.url
+        window?.representedURL = url
+        window?.title = url?.lastPathComponent ?? "minimark"
+        window?.isDocumentEdited = tabs.contains { $0.dirty }
+        if let url = url {
+            // NSDocumentController keeps the list for us — deduped, capped,
+            // persisted, and shared with the Dock menu and the Apple menu's
+            // Recent Items. No second copy of it in UserDefaults.
+            NSDocumentController.shared.noteNewRecentDocumentURL(url)
+            pushRecents()
+        }
+    }
+
+    func newTab() {
+        let tab = makeTab(url: nil)
+        // Next to the one in front rather than at the end, so a tab opened
+        // while reading something lands beside it.
+        let at = (tabs.firstIndex { $0.id == activeID }).map { $0 + 1 } ?? tabs.count
+        tabs.insert(tab, at: at)
+        activeID = tab.id
+        // No loadDoc: setTabs names a tab the page has no session for, and a
+        // tab with no session is a blank document. Saying so twice would only
+        // give it two chances to disagree with itself.
+        pushTabs()
+        syncWindowToTab()
+        saveSession()
+    }
+
+    func closeTab(_ id: Int) {
+        guard let doomed = tab(id) else { return }
+
+        // The last tab is the window. Closing it goes through the window's own
+        // path so the quit and the discard prompt stay in one place.
+        guard tabs.count > 1 else {
+            window?.performClose(nil)
+            return
+        }
+
+        confirmClose(doomed) { ok in
+            guard ok, let at = (self.tabs.firstIndex { $0.id == id }) else { return }
+            self.tabs.remove(at: at)
+            if self.activeID == id {
+                // The one to its right, or its left if it was last. Moving to
+                // the neighbour is what everything else with tabs does, and it
+                // keeps a run of closes walking in one direction.
+                let next = self.tabs[min(at, self.tabs.count - 1)]
+                self.activeID = next.id
+            }
+            self.pushTabs()
+            self.syncWindowToTab()
+            self.saveSession()
+        }
+    }
+
+    func moveTab(_ id: Int, to: Int) {
+        guard let from = (tabs.firstIndex { $0.id == id }) else { return }
+        let dest = max(0, min(to, tabs.count - 1))
+        guard dest != from else { return }
+        tabs.insert(tabs.remove(at: from), at: dest)
+        pushTabs()
+        saveSession()
+    }
+
+    /// Everything that has to happen before a tab can go away. A document with
+    /// a path is simply written, the same as the autosave a second later would
+    /// have: asking about a file the app saves by itself is theatre. One that
+    /// has never been saved has nowhere to go, so that one gets the question.
+    func confirmClose(_ tab: DocTab, _ done: @escaping (Bool) -> Void) {
+        guard tab.dirty else { done(true); return }
+
+        if let url = tab.url {
+            fetchText(tab.id) { text in
+                if let text = text { self.write(text, to: url) }
+                done(true)
+            }
+            return
+        }
+
+        // A sheet needs a window that is actually on screen. Without one
+        // beginSheetModal never presents and its completion never runs, which
+        // would leave the close hanging on an answer that can no longer come.
+        guard let window = window, window.isVisible else { done(false); return }
+
+        let alert = NSAlert()
+        alert.messageText = "Save changes to “\(tab.name)”?"
+        alert.informativeText = "Your changes will be lost if you don't save them."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Don't Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { response in
+            switch response {
+            case .alertFirstButtonReturn:  self.saveAs(tab: tab, done)
+            case .alertSecondButtonReturn: done(true)
+            default:                       done(false)
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Session
+    // ------------------------------------------------------------------
+
+    func saveSession() {
+        let defaults = UserDefaults.standard
+        let saved = tabs.filter { $0.url != nil }
+        defaults.set(saved.map { $0.url!.path }, forKey: kOpenDocsKey)
+        defaults.set(saved.firstIndex { $0.id == activeID } ?? 0, forKey: kActiveDocKey)
+        // Written alongside so a build without tabs, or an older one, still
+        // finds the document that was in front.
+        if let url = activeTab?.url { defaults.set(url.path, forKey: kLastDocKey) }
+        else { defaults.removeObject(forKey: kLastDocKey) }
+    }
+
+    /// Reopen what was open. Returns false when there was nothing to reopen,
+    /// which is the caller's signal to leave the welcome document alone.
+    @discardableResult
+    func restoreSession() -> Bool {
+        let defaults = UserDefaults.standard
+        var paths = defaults.stringArray(forKey: kOpenDocsKey) ?? []
+        if paths.isEmpty, let legacy = defaults.string(forKey: kLastDocKey) { paths = [legacy] }
+
+        let fm = FileManager.default
+        var seen = Set<String>()
+        let urls = paths
+            .filter { !$0.isEmpty && fm.isReadableFile(atPath: $0) }
+            .map { URL(fileURLWithPath: $0).standardizedFileURL }
+            .filter { seen.insert($0.path).inserted }
+            .prefix(kMaxRestoredTabs)
+        guard !urls.isEmpty else { return false }
+
+        var restored: [DocTab] = []
+        var texts: [(DocTab, String)] = []
+        for url in urls {
+            // A file that has become unreadable since it was noted is skipped
+            // rather than reported: a launch is the wrong moment for a stack of
+            // alerts about documents nobody has asked for yet.
+            guard let text = readText(url) else { continue }
+            let tab = DocTab(id: nextTabID, url: url)
+            nextTabID += 1
+            restored.append(tab)
+            texts.append((tab, text))
+        }
+        guard !restored.isEmpty else { return false }
+
+        tabs = restored
+        let want = defaults.integer(forKey: kActiveDocKey)
+        activeID = restored[max(0, min(want, restored.count - 1))].id
+
+        // Every session is handed over before the list is, so the strip has
+        // somewhere to switch *to*. setTabs then activates whichever was in
+        // front and the web layer finds its text already waiting.
+        for (tab, text) in texts {
+            js("if(window.App)App.loadDoc(\(jsLiteral(text))," +
+               "\(jsLiteral(tab.name)),\(jsLiteral(tab.dir)),\(tab.id))")
+        }
+        pushTabs()
+        syncWindowToTab()
+        return true
     }
 
     // ------------------------------------------------------------------
     // Documents
     // ------------------------------------------------------------------
 
-    func setDocument(_ url: URL?) {
-        docURL = url
-        lastMTime = url.flatMap(modificationDate)
-        window?.representedURL = url
-        window?.title = url?.lastPathComponent ?? "minimark"
+    /// Give a tab a path, and follow it with everything that hangs off one.
+    /// Defaults to the tab in front, which is what every caller written before
+    /// tabs existed means.
+    func setDocument(_ url: URL?, tab: DocTab? = nil) {
+        guard let target = tab ?? activeTab else { return }
+        target.url = url
+        target.mtime = url.flatMap(modificationDate)
         if let url = url {
-            UserDefaults.standard.set(url.path, forKey: kLastDocKey)
-            // NSDocumentController keeps the list for us — deduped, capped,
-            // persisted, and shared with the Dock menu and the Apple menu's
-            // Recent Items. No second copy of it in UserDefaults.
             NSDocumentController.shared.noteNewRecentDocumentURL(url)
             pushRecents()
-        } else {
-            UserDefaults.standard.removeObject(forKey: kLastDocKey)
         }
+        if target.id == activeID { syncWindowToTab() }
+        pushTabs()
+        saveSession()
     }
 
     func readText(_ url: URL) -> String? {
@@ -924,30 +1424,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         return nil
     }
 
+    /// `silent` is for the autosave path, which runs unprompted: a modal sheet
+    /// there interrupts typing, and because the document stays dirty every
+    /// keystroke reschedules the write, so one unwritable file produces an
+    /// alert roughly once a second.
     @discardableResult
-    func write(_ text: String, to url: URL) -> Bool {
+    func write(_ text: String, to url: URL, silent: Bool = false) -> Bool {
         do {
             try text.write(to: url, atomically: true, encoding: .utf8)
-            lastMTime = modificationDate(url)      // don't watch our own write back in
+            stampMTime(url)                        // don't watch our own write back in
             return true
         } catch {
-            presentError("Could not save “\(url.lastPathComponent)”", error.localizedDescription)
+            if !silent {
+                presentError("Could not save “\(url.lastPathComponent)”", error.localizedDescription)
+            }
             return false
         }
     }
 
+    /// Every tab holding this path, so the watcher does not report our own
+    /// write back to us as an outside change.
+    func stampMTime(_ url: URL) {
+        let now = modificationDate(url)
+        let target = url.standardizedFileURL
+        for tab in tabs where tab.url?.standardizedFileURL == target { tab.mtime = now }
+    }
+
+    /// Open a file into a tab. Which tab depends on what is in front: an
+    /// untitled document nobody has typed in is a placeholder, so it is used
+    /// rather than left behind, and anything else gets a tab of its own.
     func openDocument(at url: URL) {
+        // Already open. Two tabs on one file would give it two undo stacks and
+        // two autosaves racing for the same path, so this brings the one that
+        // exists forward instead.
+        if let open = tabs.first(where: { $0.url?.standardizedFileURL == url.standardizedFileURL }) {
+            activate(open.id)
+            command("showTabs")
+            return
+        }
+
         guard let text = readText(url) else {
             presentError("Could not open “\(url.lastPathComponent)”",
                          "The file could not be read as text.")
             return
         }
-        setDocument(url)
-        docDirty = false
-        window?.isDocumentEdited = false
+
+        let target: DocTab
+        if let current = activeTab, current.url == nil, !current.dirty {
+            target = current
+        } else {
+            let fresh = makeTab(url: nil)
+            let at = (tabs.firstIndex { $0.id == activeID }).map { $0 + 1 } ?? tabs.count
+            tabs.insert(fresh, at: at)
+            target = fresh
+        }
+
+        target.dirty = false
+        // The text first, then the list. loadDoc parks a document named
+        // against a tab that is not yet in front, so by the time setTabs
+        // switches to it the page already has it — the other order shows an
+        // empty document for however long the two messages take to cross.
         js("if(window.App)App.loadDoc(\(jsLiteral(text))," +
            "\(jsLiteral(url.lastPathComponent))," +
-           "\(jsLiteral(url.deletingLastPathComponent().path)))")
+           "\(jsLiteral(url.deletingLastPathComponent().path)),\(target.id))")
+        activeID = target.id
+        setDocument(url, tab: target)
+        syncWindowToTab()
     }
 
     func docContentTypes() -> [UTType] {
@@ -969,10 +1511,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         return types.isEmpty ? [.image] : types
     }
 
-    /// Save when there is a path, Save As when there is not.
-    func saveDocument(_ done: @escaping (Bool) -> Void) {
-        guard let url = docURL else { saveAs(done); return }
-        fetchText { text in
+    /// Save when there is a path, Save As when there is not. Defaults to the
+    /// tab in front; the close and quit paths name one, because by then the
+    /// document being written may not be the one on screen.
+    func saveDocument(tab: DocTab? = nil, _ done: @escaping (Bool) -> Void) {
+        guard let target = tab ?? activeTab else { done(false); return }
+        guard let url = target.url else { saveAs(tab: target, done); return }
+        fetchText(target.id) { text in
             guard let text = text else {
                 self.presentError("Could not save “\(url.lastPathComponent)”",
                                   "minimark could not read the document back from the editor. "
@@ -981,20 +1526,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 return
             }
             let ok = self.write(text, to: url)
-            if ok { self.pushSaved(url) }
+            if ok {
+                target.dirty = false
+                self.window?.isDocumentEdited = self.tabs.contains { $0.dirty }
+                self.pushSaved(url, tab: target)
+            }
             done(ok)
         }
     }
 
-    func saveAs(_ done: @escaping (Bool) -> Void) {
+    func saveAs(tab: DocTab? = nil, _ done: @escaping (Bool) -> Void) {
+        guard let target = tab ?? activeTab, let window = window else { done(false); return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = docContentTypes()
-        panel.nameFieldStringValue = docURL?.lastPathComponent ?? "Untitled.md"
+        panel.nameFieldStringValue = target.name
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
         panel.beginSheetModal(for: window) { response in
             guard response == .OK, let url = panel.url else { done(false); return }
-            self.fetchText { text in
+            self.fetchText(target.id) { text in
                 guard let text = text else {
                     self.presentError("Could not save “\(url.lastPathComponent)”",
                                       "minimark could not read the document back from the editor.")
@@ -1002,34 +1552,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                     return
                 }
                 guard self.write(text, to: url) else { done(false); return }
-                self.setDocument(url)
-                self.docDirty = false
-                self.window?.isDocumentEdited = false
-                self.pushSaved(url)
+                target.dirty = false
+                self.setDocument(url, tab: target)
+                self.window?.isDocumentEdited = self.tabs.contains { $0.dirty }
+                self.pushSaved(url, tab: target)
                 done(true)
             }
         }
     }
 
+    /// Everything that has to be settled before the window can go. Each dirty
+    /// tab in turn, on the same terms as closing one: a document with a path
+    /// is written, one that has never been saved is asked about, and a Cancel
+    /// anywhere stops the whole thing.
     func confirmDiscard(_ done: @escaping (Bool) -> Void) {
-        guard docDirty else { done(true); return }
-        let alert = NSAlert()
-        alert.messageText = "Save changes to “\(docURL?.lastPathComponent ?? "Untitled.md")”?"
-        alert.informativeText = "Your changes will be lost if you don't save them."
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Don't Save")
-        alert.addButton(withTitle: "Cancel")
-        alert.beginSheetModal(for: window) { response in
-            switch response {
-            case .alertFirstButtonReturn:  self.saveDocument(done)
-            case .alertSecondButtonReturn: done(true)
-            default:                       done(false)
+        var queue = tabs.filter { $0.dirty }
+        guard !queue.isEmpty else { done(true); return }
+
+        func step() {
+            guard !queue.isEmpty else { done(true); return }
+            let next = queue.removeFirst()
+            confirmClose(next) { ok in
+                guard ok else { done(false); return }
+                step()
             }
         }
+        step()
     }
 
     func renameDocument(to raw: String) {
-        guard let url = docURL else { menuSaveAs(nil); return }
+        guard let target = activeTab, let url = target.url else { menuSaveAs(nil); return }
 
         var name = raw
             .replacingOccurrences(of: "/", with: "-")
@@ -1045,16 +1597,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         let dest = url.deletingLastPathComponent().appendingPathComponent(name)
         if FileManager.default.fileExists(atPath: dest.path) {
             presentError("Could not rename", "“\(name)” already exists in that folder.")
-            js("if(window.App)App.renamed(\(jsLiteral(url.lastPathComponent)))")
+            js("if(window.App)App.renamed(\(jsLiteral(url.lastPathComponent)),\(target.id))")
             return
         }
         do {
             try FileManager.default.moveItem(at: url, to: dest)
-            setDocument(dest)
-            js("if(window.App)App.renamed(\(jsLiteral(name)))")
+            setDocument(dest, tab: target)
+            js("if(window.App)App.renamed(\(jsLiteral(name)),\(target.id))")
         } catch {
             presentError("Could not rename", error.localizedDescription)
-            js("if(window.App)App.renamed(\(jsLiteral(url.lastPathComponent)))")
+            js("if(window.App)App.renamed(\(jsLiteral(url.lastPathComponent)),\(target.id))")
         }
     }
 
@@ -1064,22 +1616,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     func scheduleAutosave() {
         autosaveWork?.cancel()
-        guard docURL != nil else { return }   // a never-saved Untitled has nowhere to go
+        // A never-saved Untitled has nowhere to go, but another tab may.
+        guard tabs.contains(where: { $0.url != nil }) else { return }
         let work = DispatchWorkItem { [weak self] in self?.runAutosave() }
         autosaveWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + kAutosaveDelay, execute: work)
     }
 
+    /// Every dirty document with a path, not only the one on screen. Editing a
+    /// tab and switching away from it used to leave the edit unwritten until
+    /// you came back — which, with several tabs open, could be never.
     func runAutosave() {
-        guard let url = docURL, docDirty else { return }
-        fetchText { text in
-            // Silent on failure: autosave runs unprompted, so an alert here
-            // would interrupt typing. The file simply keeps its last good
-            // contents and the next save tries again.
-            guard let text = text else { return }
-            guard let current = self.docURL, current == url else { return }
-            guard self.write(text, to: current) else { return }
-            self.js("if(window.App)App.autoSaved()")
+        for tab in tabs where tab.dirty && tab.url != nil {
+            guard let url = tab.url else { continue }
+            fetchText(tab.id) { text in
+                // Silent on failure: autosave runs unprompted, so an alert here
+                // would interrupt typing. The file keeps its last good contents
+                // and the next save tries again.
+                guard let text = text else { return }
+                guard tab.url == url else { return }        // renamed mid-flight
+                guard self.write(text, to: url, silent: true) else { return }
+                tab.dirty = false
+                self.window?.isDocumentEdited = self.tabs.contains { $0.dirty }
+                self.js("if(window.App)App.autoSaved(\(tab.id))")
+            }
         }
     }
 
@@ -1091,31 +1651,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         watchTimer = timer
     }
 
+    /// Every open document, not only the one on screen — a tab you are not
+    /// looking at is exactly the one something else is most likely to change
+    /// underneath you.
+    ///
+    /// Only the one in front ever asks a question. A background document that
+    /// has been edited elsewhere and has nothing unsaved of its own is simply
+    /// brought up to date; one with unsaved changes is left alone until you go
+    /// back to it, which is when there is a person to ask.
     func checkFileOnDisk() {
-        guard !reloadPromptUp, let url = docURL, let now = modificationDate(url) else { return }
-        guard let known = lastMTime else { lastMTime = now; return }
-        guard now != known else { return }
-        lastMTime = now
+        guard !reloadPromptUp else { return }
+        for tab in tabs {
+            guard let url = tab.url, let now = modificationDate(url) else { continue }
+            guard let known = tab.mtime else { tab.mtime = now; continue }
+            guard now != known else { continue }
 
-        guard let text = readText(url) else { return }
+            // Nothing unsaved here, so there is nothing to decide: take the
+            // new text, whether or not this is the document on screen.
+            guard tab.dirty else {
+                guard let text = readText(url) else { continue }
+                tab.mtime = now
+                js("if(window.App)App.externalChange(\(jsLiteral(text)),\(tab.id))")
+                continue
+            }
 
-        guard docDirty else {
-            js("if(window.App)App.externalChange(\(jsLiteral(text)))")
-            return
-        }
+            // Unsaved changes on both sides. Only the document in front gets
+            // asked about, and the others keep their old modification date on
+            // purpose — dropping it here would mark the change as handled and
+            // the question would never be asked when you came back to the tab.
+            guard tab.id == activeID, let window = window, window.isVisible else { continue }
+            guard let text = readText(url) else { continue }
+            tab.mtime = now
 
-        reloadPromptUp = true
-        let alert = NSAlert()
-        alert.messageText = "“\(url.lastPathComponent)” changed on disk"
-        alert.informativeText = "You have unsaved changes here. Reload the file and discard them, or keep what is on screen?"
-        alert.addButton(withTitle: "Reload")
-        alert.addButton(withTitle: "Keep Mine")
-        alert.beginSheetModal(for: window) { response in
-            self.reloadPromptUp = false
-            guard response == .alertFirstButtonReturn else { return }
-            self.docDirty = false
-            self.window?.isDocumentEdited = false
-            self.js("if(window.App)App.externalChange(\(jsLiteral(text)))")
+            reloadPromptUp = true
+            let alert = NSAlert()
+            alert.messageText = "“\(url.lastPathComponent)” changed on disk"
+            alert.informativeText = "You have unsaved changes here. Reload the file and discard them, or keep what is on screen?"
+            alert.addButton(withTitle: "Reload")
+            alert.addButton(withTitle: "Keep Mine")
+            alert.beginSheetModal(for: window) { response in
+                self.reloadPromptUp = false
+                guard response == .alertFirstButtonReturn else { return }
+                tab.dirty = false
+                self.window?.isDocumentEdited = self.tabs.contains { $0.dirty }
+                self.js("if(window.App)App.externalChange(\(jsLiteral(text)),\(tab.id))")
+            }
+            return                              // one question at a time
         }
     }
 
@@ -1305,6 +1886,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         if fullScreen {
             strip?.isHidden = true
             edge?.isHidden = true
+            // The strip can still be peeked at in full screen, and its empty
+            // run still has to be draggable when it is.
+            rest?.isHidden = !tabsShowing || (restW?.constant ?? 0) < 1
             return                 // leave the buttons to AppKit while full screen
         }
         edge?.isHidden = false
@@ -1312,8 +1896,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         // While zen has the bar hidden, its drag region has to go with it.
         // Otherwise there is an invisible dead patch sitting on the paper,
         // swallowing clicks and selections over text that looks perfectly live.
-        let hide = zenOn && !zenRevealed
+        //
+        // The tab strip overrides zen: reaching for the top edge is a request
+        // for the chrome back, and a strip arriving without the window buttons
+        // in the corner it has just cleared for them looks broken.
+        let hide = zenOn && !zenRevealed && !tabsShowing
         strip?.isHidden = hide
+        rest?.isHidden = hide || !tabsShowing || (restW?.constant ?? 0) < 1
         for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
             w.standardWindowButton(type)?.isHidden = hide
         }
@@ -1324,10 +1913,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     // ------------------------------------------------------------------
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard docDirty else { return true }
+        guard tabs.contains(where: { $0.dirty }) else { return true }
         confirmDiscard { ok in
             guard ok else { return }
-            self.docDirty = false
+            for tab in self.tabs { tab.dirty = false }
             self.window?.isDocumentEdited = false
             self.window?.close()
         }
@@ -1374,7 +1963,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             }
             decisionHandler(.cancel)
             if kDocExtensions.contains(url.pathExtension.lowercased()) {
-                confirmDiscard { ok in if ok { self.openDocument(at: url) } }
+                openDocument(at: url)
             }
             return
         }
@@ -1402,6 +1991,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     func runMenuAction(_ name: String) {
         switch name {
         case "new":        menuNew(nil)
+        case "newTab":     menuNew(nil)
+        case "closeTab":   menuCloseTab(nil)
         case "open":       menuOpen(nil)
         case "save":       menuSave(nil)
         case "saveAs":     menuSaveAs(nil)
@@ -1421,27 +2012,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         command(name)
     }
 
+    /// New and New Tab are the same act in a one-window app: a blank document
+    /// alongside the others rather than over the top of one. Nothing is
+    /// discarded, so nothing has to be asked about first.
     @objc func menuNew(_ sender: Any?) {
-        confirmDiscard { ok in
-            guard ok else { return }
-            self.setDocument(nil)
-            self.docDirty = false
-            self.window?.isDocumentEdited = false
-            self.js("if(window.App)App.loadDoc('','Untitled.md','')")
-        }
+        newTab()
+        command("showTabs")
+    }
+
+    @objc func menuCloseTab(_ sender: Any?) {
+        guard let id = activeTab?.id else { window?.performClose(nil); return }
+        closeTab(id)
     }
 
     @objc func menuOpen(_ sender: Any?) {
-        confirmDiscard { ok in
-            guard ok else { return }
-            let panel = NSOpenPanel()
-            panel.allowedContentTypes = self.docContentTypes()
-            panel.allowsMultipleSelection = false
-            panel.canChooseDirectories = false
-            panel.beginSheetModal(for: self.window) { response in
-                guard response == .OK, let url = panel.url else { return }
-                self.openDocument(at: url)
-            }
+        guard let window = window else { return }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = docContentTypes()
+        // Several at once now that there is somewhere to put them.
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.beginSheetModal(for: window) { response in
+            guard response == .OK, !panel.urls.isEmpty else { return }
+            for url in panel.urls { self.openDocument(at: url) }
+            self.command("showTabs")
         }
     }
 
@@ -1457,8 +2051,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     /// Recent documents that are still on disk. A menu that offers a file it
     /// cannot open is worse than a shorter menu.
     func recentDocuments() -> [URL] {
-        NSDocumentController.shared.recentDocumentURLs.filter { url in
-            url != docURL && FileManager.default.isReadableFile(atPath: url.path)
+        // Every file already in a tab is dropped, not only the one in front:
+        // offering to open something that is one click away in the strip is
+        // noise, and taking it would only bring that tab forward anyway.
+        let open = Set(tabs.compactMap { $0.url?.standardizedFileURL })
+        return NSDocumentController.shared.recentDocumentURLs.filter { url in
+            !open.contains(url.standardizedFileURL)
+                && FileManager.default.isReadableFile(atPath: url.path)
         }
     }
 
@@ -1515,10 +2114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                          "The file has been moved, renamed or deleted.")
             return
         }
-        confirmDiscard { ok in
-            guard ok else { return }
-            self.openDocument(at: url)
-        }
+        openDocument(at: url)
     }
 
     @objc func clearRecent(_ sender: Any?) {
@@ -1684,6 +2280,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        // The tab items are the one place the menu has state to show as well
+        // as to enable: "Keep Tabs Showing" is a toggle and reads its own pref.
+        if let name = menuItem.representedObject as? String {
+            switch name {
+            case "nextTab", "prevTab":
+                return tabs.count > 1
+            case "toggleTabs":
+                menuItem.state = UserDefaults.standard.string(forKey: "tabsPin") == "1" ? .on : .off
+                return true
+            default:
+                return true
+            }
+        }
         switch menuItem.action {
         case #selector(menuReveal(_:)), #selector(menuRename(_:)):
             return docURL != nil
@@ -1815,7 +2424,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
         // ---- File --------------------------------------------------------
         let file = submenu(main, "File")
+        // Two names for the one act. minimark has a single window, so a new
+        // document is always a new tab; ⌘N is what every Mac app trains you to
+        // press and ⌘T is what everything with tabs does.
         add(file, "New", key: "n", action: #selector(menuNew(_:)), target: self)
+        add(file, "New Tab", key: "t", action: #selector(menuNew(_:)), target: self)
         add(file, "Open…", key: "o", action: #selector(menuOpen(_:)), target: self)
         let recentItem = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
         recentMenu = NSMenu(title: "Open Recent")
@@ -1839,7 +2452,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             action: #selector(menuPageSetup(_:)), target: self)
         add(file, "Print…", key: "p", action: #selector(menuPrint(_:)), target: self)
         file.addItem(.separator())
-        add(file, "Close", key: "w", action: NSSelectorFromString("performClose:"))
+        // ⌘W closes the tab, and the window along with it when it is the last
+        // one, which is what every tabbed Mac app does. ⇧⌘W is the whole
+        // window regardless.
+        add(file, "Close Tab", key: "w", action: #selector(menuCloseTab(_:)), target: self)
+        add(file, "Close Window", key: "w", mods: [.command, .shift],
+            action: NSSelectorFromString("performClose:"))
 
         // ---- Edit --------------------------------------------------------
         let edit = submenu(main, "Edit")
@@ -1903,6 +2521,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         view.addItem(.separator())
         add(view, "Appearance", key: "l", mods: [.command, .shift], command: "themes")
         view.addItem(.separator())
+        // The strip hides itself by design. This is for anyone who would
+        // rather see it, and it is remembered.
+        add(view, "Keep Tabs Showing", key: "t", mods: [.control, .option], command: "toggleTabs")
+        view.addItem(.separator())
         add(view, "Enter Full Screen", key: "f", mods: [.control, .command],
             action: NSSelectorFromString("toggleFullScreen:"))
 
@@ -1918,6 +2540,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         let window = submenu(main, "Window")
         add(window, "Minimize", key: "m", action: NSSelectorFromString("performMiniaturize:"))
         add(window, "Zoom", action: NSSelectorFromString("performZoom:"))
+        window.addItem(.separator())
+        // ⌃⇥ and ⌃⇧⇥ here; ⇧⌘] and ⇧⌘[ are handled in the web layer, which is
+        // the only way to have both without two more items in this menu.
+        add(window, "Show Next Tab", key: "\t", mods: [.control], command: "nextTab")
+        add(window, "Show Previous Tab", key: "\t", mods: [.control, .shift], command: "prevTab")
         window.addItem(.separator())
         add(window, "Bring All to Front",
             action: #selector(NSApplication.arrangeInFront(_:)), target: NSApp)

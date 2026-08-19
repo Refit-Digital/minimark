@@ -1360,6 +1360,344 @@
   window.addEventListener('resize', hideBubble);
 
   /* ============================================================
+     TABS
+
+     Several documents open at once, and none of the others on screen unless
+     you ask for them. The strip lives off the top of the window and comes
+     down when the pointer reaches the edge, which is the same gesture zen
+     already uses to bring the chrome back, so the two compose rather than
+     compete.
+
+     Who owns what: the shell owns the tabs, because it owns the files — the
+     list, the order, the paths, the dirty flags, autosave and the watcher.
+     This owns what each tab *looks* like and what it *feels* like to come
+     back to, which is a session in app.js: text, undo, scroll, caret. Every
+     message between the two carries the tab id and nothing else about the
+     document, so neither side has to hold a copy of the other's half.
+
+     Every user action here is a request, not a decision. Clicking a tab
+     sends `tabSelect` and the strip switches immediately, because the swap is
+     local and instant; closing one sends `tabClose` and nothing happens until
+     the shell has decided whether the document needs saving first.
+     ============================================================ */
+  var tabbar = $('#tabbar'), tabsEl = $('#tabs'), tabAdd = $('#tabAdd'),
+      tabRest = $('#tabRest');
+
+  /* How far down the window still counts as the top edge, how long the
+     pointer has to stay there, and how long the strip waits before it leaves
+     again. The grace on the way out is the longer of the two on purpose: the
+     cost of it lingering is nothing, and the cost of it snapping shut under a
+     pointer on its way to a tab is a misclick on the document underneath. */
+  var PEEK_BAND = 16, PEEK_IN = 110, PEEK_OUT = 260, PEEK_FLASH = 1600;
+
+  var tabs = [{ id: 0, name: 'Untitled.md', dir: '', dirty: false }];
+  var sessions = {};        /* id -> parked session, for every tab but the one on screen */
+  var tabsPinned = false;   /* the pref: the strip stays out */
+  var tabsOpen = false;
+  var peekNative = false;   /* the shell's tracking area has the pointer up there */
+  var peekLocal = false;    /* …and the page's own backstop, below the drag strip */
+  var peekUntil = 0;        /* a flash after a keyboard switch, as a deadline */
+  var openTimer = null, closeTimer = null, flashTimer = null;
+  var drag = null, restSig = '', pendingRender = false;
+
+  function byId(id) {
+    for (var i = 0; i < tabs.length; i++) if (tabs[i].id === id) return tabs[i];
+    return null;
+  }
+  function indexOfTab(id) {
+    for (var i = 0; i < tabs.length; i++) if (tabs[i].id === id) return i;
+    return -1;
+  }
+
+  /* ---------------- reveal ---------------- */
+
+  function wantTabs() {
+    return tabsPinned || peekNative || peekLocal || !!drag || Date.now() < peekUntil;
+  }
+
+  function scheduleTabs() {
+    var want = wantTabs();
+    clearTimeout(openTimer); clearTimeout(closeTimer);
+    if (want === tabsOpen) return;
+    if (want) openTimer = setTimeout(function () { setTabsOpen(true); }, tabsPinned ? 0 : PEEK_IN);
+    else closeTimer = setTimeout(function () { setTabsOpen(false); }, PEEK_OUT);
+  }
+
+  function setTabsOpen(on) {
+    if (on === tabsOpen) return;
+    tabsOpen = on;
+    el.body.classList.toggle('tabs-open', on);
+    tabbar.setAttribute('aria-hidden', on ? 'false' : 'true');
+    /* In split view the bar lives on the pane divider, which is the middle of
+       the strip. It comes to the corner for as long as the strip is out, and
+       posts its new x on the way, so the shell brings the real window buttons
+       with it. */
+    MM.positionBar(true);
+    send('tabsOpen', { on: on });
+    if (on) requestAnimationFrame(measureRest); else measureRest();
+  }
+
+  /* The empty run past the last tab is the drag handle, so the shell needs its
+     rectangle to park a real drag region over it — WebKit has no app-region,
+     and a web view cannot move its own window. */
+  function measureRest() {
+    var sig = '', x = 0, w = 0, h = 0;
+    if (tabsOpen) {
+      var r = tabRest.getBoundingClientRect();
+      x = Math.round(r.left); w = Math.round(r.width); h = Math.round(r.height);
+      sig = x + ':' + w + ':' + h;
+    }
+    if (sig === restSig) return;
+    restSig = sig;
+    send('tabDrag', { x: x, w: w, h: h });
+  }
+
+  /* Hold the strip open briefly after something that changed which tab is in
+     front without the pointer being anywhere near it — a keyboard switch, or
+     a document opening. Otherwise the tab you just moved to is the one thing
+     you cannot see. */
+  function flashTabs() {
+    peekUntil = Date.now() + PEEK_FLASH;
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(scheduleTabs, PEEK_FLASH + 30);
+    scheduleTabs();
+  }
+
+  /* The backstop for the shell's tracking area. It cannot see the top 8px —
+     those belong to a native drag strip that takes the mouse before the page
+     does — so on its own this would be a 8px trigger, which is why the shell
+     drives the reveal and this only catches the rest of the band. */
+  document.addEventListener('mousemove', function (e) {
+    var band = tabsOpen ? tabbar.offsetHeight + 14 : PEEK_BAND;
+    var on = e.clientY <= band;
+    if (on === peekLocal) return;
+    peekLocal = on;
+    scheduleTabs();
+  });
+
+  /* ---------------- the strip ---------------- */
+
+  var X_SVG = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" ' +
+              'stroke-width="2" stroke-linecap="round"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>';
+
+  function renderTabs() {
+    /* Not mid-drag. Rebuilding the nodes under a pointer that is holding one
+       of them would leave the drag measuring a element that is no longer in
+       the document, and the drop would go nowhere. Whatever arrived while the
+       drag was running is picked up when it ends. */
+    if (drag) { pendingRender = true; return; }
+    pendingRender = false;
+    tabsEl.textContent = '';
+    tabs.forEach(function (t) {
+      var node = document.createElement('div');
+      node.className = 'tab' + (t.id === state.tabId ? ' on' : '') + (t.dirty ? ' dirty' : '');
+      node.dataset.id = String(t.id);
+      node.setAttribute('role', 'tab');
+      node.setAttribute('aria-selected', t.id === state.tabId ? 'true' : 'false');
+      node.title = t.dir ? t.dir + '/' + t.name : t.name;
+
+      var name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = t.name;
+      node.appendChild(name);
+
+      var dot = document.createElement('span');
+      dot.className = 'dot';
+      node.appendChild(dot);
+
+      var x = document.createElement('button');
+      x.type = 'button';
+      x.className = 'x';
+      x.setAttribute('aria-label', 'Close ' + t.name);
+      x.innerHTML = X_SVG;
+      node.appendChild(x);
+
+      tabsEl.appendChild(node);
+    });
+    requestAnimationFrame(measureRest);
+  }
+
+  /* ---------------- switching ---------------- */
+
+  /* Park what is on screen, put something else there. `seed` is a session
+     handed in from outside — a document that has just arrived from disk —
+     rather than one coming back from where it was left. */
+  function swapTo(id, seed, opts) {
+    var out = state.tabId;
+    if (out === id && !seed) { renderTabs(); return; }
+
+    /* Only park a tab the shell still has. The commonest reason for a swap is
+       that the outgoing document was just closed, and keeping its session
+       would be a leak holding the whole text of a file nobody has open. */
+    if (out !== id && byId(out)) sessions[out] = MM.sessionCapture();
+
+    var s = seed || sessions[id];
+    if (!s) {
+      var t = byId(id);
+      s = MM.sessionBlank(t && t.name, t && t.dir);
+    }
+    delete sessions[id];                 /* it is on screen now, not parked */
+    state.tabId = id;
+    MM.sessionRestore(s, opts);
+    docName.textContent = state.fileName;
+    fx.idx = -1;                         /* the find cursor belonged to the old text */
+    renderTabs();
+  }
+
+  function selectTab(id) {
+    if (id === state.tabId || !byId(id)) return;
+    swapTo(id);
+    send('tabSelect', { id: id });
+  }
+
+  function stepTab(delta) {
+    if (tabs.length < 2) return;
+    var i = indexOfTab(state.tabId);
+    if (i < 0) i = 0;
+    var next = tabs[(i + delta + tabs.length) % tabs.length];
+    flashTabs();
+    selectTab(next.id);
+  }
+
+  /* ---------------- pointer ---------------- */
+
+  tabsEl.addEventListener('pointerdown', function (e) {
+    if (e.button !== 0 || drag) return;
+    var node = e.target.closest && e.target.closest('.tab');
+    if (!node) return;
+    if (e.target.closest('.x')) return;      /* the close button owns its own click */
+
+    var id = parseInt(node.dataset.id, 10);
+    if (isNaN(id)) return;
+    selectTab(id);
+
+    /* Selecting rebuilds the strip, so the node the pointer went down on is
+       no longer in the document. Take the live one instead — dragging the
+       detached copy leaves every measurement below reading off a node with no
+       position at all. */
+    var live = tabsEl.querySelector('.tab[data-id="' + id + '"]');
+    if (!live) return;
+    var nodes = Array.prototype.slice.call(tabsEl.children);
+    var from = nodes.indexOf(live);
+    if (from < 0) return;
+
+    drag = {
+      id: id, node: live, nodes: nodes,
+      rects: nodes.map(function (n) { return n.getBoundingClientRect(); }),
+      from: from, to: from,
+      startX: e.clientX, moved: false
+    };
+    try { tabsEl.setPointerCapture(e.pointerId); } catch (err) {}
+  });
+
+  /* The dragged tab is lifted visually only: its slot in the flow stays put
+     and the others translate around it, so nothing reflows under the pointer
+     and letting go is a single reorder rather than a settling animation. */
+  function layoutDrag() {
+    var shift = drag.rects[drag.from].width + 1;   /* +1 for the strip's gap */
+    drag.nodes.forEach(function (n, i) {
+      if (i === drag.from) return;
+      var by = 0;
+      if (drag.to < drag.from && i >= drag.to && i < drag.from) by = shift;
+      else if (drag.to > drag.from && i > drag.from && i <= drag.to) by = -shift;
+      n.classList.add('sliding');
+      n.style.transform = by ? 'translateX(' + by + 'px)' : '';
+    });
+  }
+
+  tabsEl.addEventListener('pointermove', function (e) {
+    if (!drag) return;
+    var dx = e.clientX - drag.startX;
+    if (!drag.moved) {
+      if (Math.abs(dx) < 4) return;         /* a click is not a drag */
+      drag.moved = true;
+      drag.node.classList.add('dragging');
+    }
+    drag.node.style.transform = 'translateX(' + dx + 'px)';
+
+    /* Where it would land: the first tab on the left whose centre the dragged
+       one has passed, or the last on the right. Inclusive at the boundary, so
+       letting go exactly over a tab's centre lands on that tab rather than
+       one short of it. */
+    var mid = drag.rects[drag.from].left + drag.rects[drag.from].width / 2 + dx;
+    var to = drag.from;
+    for (var i = 0; i < drag.rects.length; i++) {
+      var c = drag.rects[i].left + drag.rects[i].width / 2;
+      if (i < drag.from && mid <= c) { to = i; break; }
+      if (i > drag.from && mid >= c) { to = i; }
+    }
+    if (to !== drag.to) { drag.to = to; layoutDrag(); }
+  });
+
+  function endDrag() {
+    if (!drag) return;
+    var d = drag;
+    drag = null;
+    d.node.classList.remove('dragging');
+    d.nodes.forEach(function (n) { n.classList.remove('sliding'); n.style.transform = ''; });
+    if (pendingRender && !(d.moved && d.to !== d.from)) renderTabs();
+    if (d.moved && d.to !== d.from) {
+      /* Reordered here as well as sent, so the strip does not sit in the old
+         order waiting for the round trip. The shell's setTabs is the
+         authority and will correct this if it disagrees. */
+      tabs.splice(d.to, 0, tabs.splice(d.from, 1)[0]);
+      renderTabs();
+      send('tabMove', { id: d.id, to: d.to });
+    }
+    scheduleTabs();
+  }
+  tabsEl.addEventListener('pointerup', endDrag);
+  tabsEl.addEventListener('pointercancel', endDrag);
+
+  tabsEl.addEventListener('click', function (e) {
+    var node = e.target.closest && e.target.closest('.tab');
+    if (!node) return;
+    var id = parseInt(node.dataset.id, 10);
+    if (isNaN(id)) return;
+
+    if (e.target.closest('.x')) { e.preventDefault(); send('tabClose', { id: id }); return; }
+
+    /* Normally a no-op: pointerdown has already selected, because a tab that
+       waits for the button to come back up feels slow and because a drag has
+       to start on the tab it is going to move. This is for every click that
+       arrives without one — assistive technology, and anything synthesising
+       events rather than moving a mouse. */
+    selectTab(id);
+  });
+
+  /* Middle-click closes, the way it does everywhere else with tabs. */
+  tabsEl.addEventListener('auxclick', function (e) {
+    if (e.button !== 1) return;
+    var node = e.target.closest && e.target.closest('.tab');
+    if (!node) return;
+    e.preventDefault();
+    var id = parseInt(node.dataset.id, 10);
+    if (!isNaN(id)) send('tabClose', { id: id });
+  });
+
+  tabAdd.addEventListener('click', function () { send('tabNew', {}); });
+
+  function setTabsPinned(on, quiet) {
+    tabsPinned = !!on;
+    scheduleTabs();
+    if (quiet) return;
+    send('pref', { key: 'tabsPin', value: tabsPinned ? '1' : '0' });
+    toast(tabsPinned ? 'Tabs stay showing' : 'Tabs hide again');
+  }
+
+  /* A tab's dirty dot should appear as you type, not a round trip later. */
+  MM.onDirty = function (v) {
+    var t = byId(state.tabId);
+    if (!t || t.dirty === v) return;
+    t.dirty = v;
+    var node = tabsEl.querySelector('.tab[data-id="' + state.tabId + '"]');
+    if (node) node.classList.toggle('dirty', v);
+  };
+
+  window.addEventListener('resize', measureRest);
+  renderTabs();
+
+  /* ============================================================
      KEYBOARD
      ============================================================ */
   document.addEventListener('keydown', function (e) {
@@ -1397,6 +1735,12 @@
     else if (k === 'i') { e.preventDefault(); MM.wrapSelection('*', '*', 'italic'); }
     else if (k === 'e') { e.preventDefault(); MM.wrapSelection('`', '`', 'code'); }
     else if (k === 'm' && e.shiftKey) { e.preventDefault(); MM.setMode(state.mode === 'split' ? 'live' : 'split'); }
+    /* Tab navigation. ⌃⇥ and ⌃⇧⇥ are in the Window menu, which claims them
+       before the page ever sees them; these are the other pair everything
+       with tabs also answers to. Matched on e.code, because shifted brackets
+       are '}' and '{' and e.key would never be ']' here. */
+    else if (e.shiftKey && e.code === 'BracketRight') { e.preventDefault(); stepTab(1); }
+    else if (e.shiftKey && e.code === 'BracketLeft') { e.preventDefault(); stepTab(-1); }
     else if (k === 'l' && e.shiftKey) { e.preventDefault(); themePop.classList.toggle('open'); }
     else if (k === 'h' && e.shiftKey) {
       e.preventDefault();
@@ -1419,33 +1763,104 @@
      NATIVE API
      ============================================================ */
   window.App = {
-    loadDoc: function (text, name, dir) {
-      MM.commitEditing(true);
-      /* Pin and bank the outgoing document while its key is still the current
-         one. Everything below changes docDir and fileName, which is what
-         histKey is built from, so a snapshot taken after this point would file
-         the old document's last edits under the new document's name. */
-      MM.histSnapshot(true);
-      MM.histFlush();
-      state.docDir = dir || '';
-      MM.setText(text, { immediate: true, markDirty: false });
-      MM.markDirty(false);
-      state.fileName = name || 'Untitled.md';
-      $('.doc-title .name').textContent = state.fileName;
-      MM.invalidateAnchors();
-      MM.setScroll('prev', 0); MM.setScroll('src', 0);
-      if (state.mode === 'split') { el.src.focus(); el.src.setSelectionRange(0, 0); }
-      MM.staggerBlocks(); MM.updateStatus();
-      /* the file as it arrived is the baseline for this document's history */
-      MM.histSnapshot(true);
-      MM.undoReset();
-      fx.idx = -1;
+    /* A document arriving from disk. The fourth argument names the tab it
+       belongs to; without one it replaces whatever is on screen, which is
+       what this call meant before there were tabs and what it still means to
+       a shell that never sends setTabs.
+
+       Naming a tab that is not the one in front parks the document there
+       instead of showing it — that is how a session is restored around
+       whichever document was in front, and how a file opened into a new tab
+       arrives with its text already waiting rather than flashing empty while
+       the two messages cross.
+
+       All the pinning and banking that used to be spelled out here now lives
+       in sessionRestore, because a tab switch has to do exactly the same
+       things in exactly the same order, and the two drifting apart is how
+       history ends up filed under the wrong document. */
+    loadDoc: function (text, name, dir, id) {
+      var tid = (id == null) ? state.tabId : (id | 0);
+      var seed = MM.sessionBlank(name, dir, text);
+      if (tid === state.tabId) { swapTo(tid, seed, { fresh: true }); return; }
+      sessions[tid] = seed;
+      renderTabs();
     },
+
+    /* The whole tab list, whenever the shell changes it: opened, closed,
+       renamed, reordered, saved. The shell is the authority — this reconciles
+       against it rather than merging with it, so the two cannot drift. */
+    setTabs: function (list) {
+      list = Array.isArray(list) ? list : [];
+      var active = state.tabId;
+      tabs = list.map(function (t) {
+        if (t && t.active) active = t.id | 0;
+        return {
+          id: t.id | 0,
+          name: (t && t.name) || 'Untitled.md',
+          dir: (t && t.dir) || '',
+          dirty: !!(t && t.dirty)
+        };
+      });
+      if (!tabs.length) tabs = [{ id: active, name: state.fileName, dir: state.docDir, dirty: state.dirty }];
+
+      /* Sessions for tabs that have gone. Dropped before the swap below, so
+         that a swap away from a tab the shell has just closed does not park
+         the whole text of a file nobody has open any more. */
+      var live = {};
+      tabs.forEach(function (t) { live[t.id] = 1; });
+      Object.keys(sessions).forEach(function (k) { if (!live[k]) delete sessions[k]; });
+
+      /* Names and folders move under parked sessions: Save As and Rename both
+         land here, and a parked session carrying the old name would file its
+         next history snapshot under a document that no longer exists. */
+      tabs.forEach(function (t) {
+        var s = sessions[t.id];
+        if (!s) return;
+        s.fileName = t.name; s.docDir = t.dir; s.dirty = t.dirty;
+      });
+
+      /* Adoption. Before the shell has said anything the page is showing its
+         welcome document under a placeholder id of its own. The first setTabs
+         replaces that id with a real one, and blanking the screen to do it
+         would throw the welcome document away — which is precisely what the
+         shell means to keep when it has nothing to restore. */
+      if (active !== state.tabId && !sessions[active] && !byId(state.tabId)) {
+        var adopted = MM.sessionCapture();
+        var t0 = byId(active);
+        if (t0) { adopted.fileName = t0.name; adopted.docDir = t0.dir; adopted.dirty = t0.dirty; }
+        sessions[active] = adopted;
+      }
+
+      if (active !== state.tabId) swapTo(active);
+      else {
+        var mine = byId(state.tabId);
+        if (mine && mine.name !== state.fileName) {
+          state.fileName = mine.name;
+          state.docDir = mine.dir;
+          docName.textContent = mine.name;
+        }
+        renderTabs();
+      }
+    },
+
+    /* The shell's tracking area, reporting whether the pointer is in the band
+       along the top of the window. It has to come from there: the top 8px are
+       a real AppKit drag strip and the page never sees a pointer in them. */
+    setPeek: function (on) { peekNative = !!on; scheduleTabs(); },
     /* What gets written to disk. It has to be the document with the open
        block's own span replaced — rebuilding it from the block list would
        flatten every blank-line run in the file, and autosave would then
        commit that to the writer's file a second after they typed. */
-    getText: function () { return MM.docText(); },
+    /* With an id, the text of any open tab — autosave runs against every
+       dirty document, not only the one on screen. An unknown id answers null
+       rather than '': every caller writes what it gets straight to disk, and
+       an empty string is a legitimate document where a missing tab is not an
+       answer at all. */
+    getText: function (id) {
+      if (id == null || (id | 0) === state.tabId) return MM.docText();
+      var s = sessions[id | 0];
+      return s ? s.text : null;
+    },
     /* A block open for editing is a textarea, and textareas do not print.
        The shell calls this and waits a beat before paginating. */
     beforePrint: function () { MM.commitEditing(true); },
@@ -1457,17 +1872,42 @@
       MM.commitEditing(true);
       return state.blocks.map(function (b, i) { return MM.md(b, i); }).join('\n');
     },
-    setSaved: function (name, dir) {
+    setSaved: function (name, dir, id) {
+      var tid = (id == null) ? state.tabId : (id | 0);
+      var t = byId(tid);
+      if (t) { t.dirty = false; if (name) t.name = name; if (dir != null) t.dir = dir; }
+
+      if (tid !== state.tabId) {
+        var s = sessions[tid];
+        if (s) {
+          s.dirty = false; s.savedAt = Date.now();
+          if (name) s.fileName = name;
+          if (dir != null) s.docDir = dir;
+        }
+        renderTabs();
+        return;
+      }
+
       MM.markDirty(false);
       state.savedAt = Date.now();
       if (dir) state.docDir = dir;
       if (name) { state.fileName = name; $('.doc-title .name').textContent = name; }
       MM.updateStatus();
       MM.histSnapshot(true);
+      renderTabs();
       toast('Saved');
     },
-    autoSaved: function () {
-      MM.markDirty(false); state.savedAt = Date.now(); MM.updateStatus();
+    autoSaved: function (id) {
+      var tid = (id == null) ? state.tabId : (id | 0);
+      var at = byId(tid);
+      if (at) at.dirty = false;
+      if (tid !== state.tabId) {
+        var bs = sessions[tid];
+        if (bs) { bs.dirty = false; bs.savedAt = Date.now(); }
+        renderTabs();
+        return;
+      }
+      MM.markDirty(false); state.savedAt = Date.now(); MM.updateStatus(); renderTabs();
       /* Unforced, deliberately. Autosave fires a second after the last
          keystroke, so forcing here made every typing pause take a snapshot and
          serialise the whole store — the 20s throttle existed and autosave was
@@ -1475,7 +1915,24 @@
          is for; this is just a file write. */
       MM.histSnapshot();
     },
-    externalChange: function (text) {
+    externalChange: function (text, id) {
+      var tid = (id == null) ? state.tabId : (id | 0);
+      if (tid !== state.tabId) {
+        /* A background document changed underneath us. Its undo history
+           described a text that is no longer on disk, so it goes: walking
+           back into edits that were never in this file is worse than having
+           nothing to walk back into. */
+        var s = sessions[tid];
+        if (s) {
+          s.text = String(text == null ? '' : text);
+          s.dirty = false; s.undo = []; s.redo = [];
+          s.scrollSrc = 0; s.scrollPrev = 0; s.sel = null;
+        }
+        var bt = byId(tid);
+        if (bt) bt.dirty = false;
+        renderTabs();
+        return;
+      }
       var sp = el.prevPane.scrollTop, ss = el.srcScroll.scrollTop;
       MM.commitEditing(true);
       MM.setText(text, { immediate: true, markDirty: false });
@@ -1483,9 +1940,17 @@
       el.prevPane.scrollTop = sp; el.srcScroll.scrollTop = ss;
       toast('Reloaded from disk');
     },
-    renamed: function (name) {
-      state.fileName = name;
-      docName.textContent = name;
+    renamed: function (name, id) {
+      var tid = (id == null) ? state.tabId : (id | 0);
+      var t = byId(tid);
+      if (t) t.name = name;
+      if (tid === state.tabId) {
+        state.fileName = name;
+        docName.textContent = name;
+      } else if (sessions[tid]) {
+        sessions[tid].fileName = name;
+      }
+      renderTabs();
       toast('Renamed');
     },
     setFullscreen: function (on) {
@@ -1561,6 +2026,7 @@
       }
       /* history no longer arrives with the prefs — it has its own store and
          its own entry point, App.setHistory */
+      if (p.tabsPin === '1') setTabsPinned(true, true);
       if (p.zen === '1') setZenSilent(true);
       if (p.focus === '1') { state.focus = true; el.body.classList.add('focus'); }
       if (p.typewriter === '1') { state.typewriter = true; twBtn.classList.add('on'); }
@@ -1604,7 +2070,14 @@
         italic: function () { MM.wrapSelection('*', '*', 'italic'); },
         code: function () { MM.wrapSelection('`', '`', 'code'); },
         link: MM.insertLink,
-        copyRich: MM.copyRich
+        copyRich: MM.copyRich,
+        /* Tabs. Opening and closing belong to the shell — it owns the files
+           and the "save this first?" sheet — so those are not here. What is
+           here is everything that only moves the strip around. */
+        nextTab: function () { stepTab(1); },
+        prevTab: function () { stepTab(-1); },
+        showTabs: flashTabs,
+        toggleTabs: function () { setTabsPinned(!tabsPinned); }
       };
       HIST_STEPS.forEach(function (s) {
         map['restore' + s.id] = function () { doRestore(s.ms, s.label); };

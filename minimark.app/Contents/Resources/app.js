@@ -23,6 +23,10 @@ window.MM = (function () {
     editing: null, dirty: false,
     zen: false, focus: false, typewriter: false,
     countIdx: 0, savedAt: null, fileName: 'Untitled.md', docDir: '',
+    /* Which of the shell's tabs is on screen. 0 until the shell says
+       otherwise, which is also what an untabbed shell would leave it at, so
+       every message carrying it stays meaningful either way. */
+    tabId: 0,
     mathReady: false, mathPending: false,
     hlReady: false, hlPending: false
   };
@@ -886,7 +890,12 @@ window.MM = (function () {
     if (state.dirty === v) return;
     state.dirty = v;
     el.body.classList.toggle('dirty', v);
-    send('dirty', { dirty: v });
+    /* Carries the tab. Only the document on screen can be edited, so the id is
+       always the active one, but the shell autosaves and closes tabs that are
+       not — it has to be able to file this against the right one rather than
+       against whichever happens to be in front when the message lands. */
+    send('dirty', { dirty: v, id: state.tabId });
+    if (MM.onDirty) MM.onDirty(v);
   }
 
   var toastTimer = null;
@@ -1295,6 +1304,111 @@ window.MM = (function () {
     else { autosize(ta); markDirty(true); }
   }
 
+  /* ---------------- editor sessions ----------------
+     One window, several documents open at once. A session is everything that
+     makes a document feel like where you left it: its text, both undo stacks,
+     where each pane was scrolled to, and the caret. The tab strip in ui.js
+     decides which one is on screen; this decides what one *is*.
+
+     The shell holds the tab list, the paths and the dirty flags, because it
+     owns the files. It deliberately does not hold the text of a background
+     document: shipping a 500-entry undo stack across the bridge on every tab
+     switch would cost megabytes for something neither side needs to persist.
+     So the sessions live here, in the page, and the two halves meet at an id.
+
+     Version history is not part of a session and does not need to be. The
+     store is keyed by folder + filename, so it already follows the document
+     rather than the tab; a swap only has to pin and bank the outgoing one
+     before its key changes, which is what loadDoc has always done. */
+
+  function sessionCapture() {
+    commitEditing(true);
+    return {
+      text: docText(),
+      fileName: state.fileName,
+      docDir: state.docDir,
+      dirty: state.dirty,
+      savedAt: state.savedAt,
+      /* Copies. The live stacks are mutated in place by every keystroke, so
+         handing over the arrays themselves would leave a parked session
+         growing along with the one on screen. */
+      undo: undoStack.slice(),
+      redo: redoStack.slice(),
+      scrollSrc: el.srcScroll.scrollTop,
+      scrollPrev: el.prevPane.scrollTop,
+      sel: state.mode === 'split'
+        ? { start: el.src.selectionStart || 0, end: el.src.selectionEnd || 0 }
+        : null
+    };
+  }
+
+  function sessionBlank(name, dir, text) {
+    return {
+      text: text || '', fileName: name || 'Untitled.md', docDir: dir || '',
+      dirty: false, savedAt: null, undo: [], redo: [],
+      scrollSrc: 0, scrollPrev: 0, sel: null
+    };
+  }
+
+  /* Put a session on screen. `opts.fresh` is for a document arriving from
+     disk rather than coming back from another tab: it drops the undo history
+     and takes a baseline snapshot, which is what loadDoc used to do inline. */
+  function sessionRestore(s, opts) {
+    opts = opts || {};
+    commitEditing(true);
+
+    /* Bank the outgoing document while its key is still the current one.
+       histKey() is built from docDir and fileName, both of which are about to
+       change, so a snapshot taken after this point would file the last edits
+       of the document being left under the name of the one arriving. */
+    histSnapshot(true);
+    histFlush();
+
+    state.docDir = s.docDir || '';
+    state.fileName = s.fileName || 'Untitled.md';
+    state.savedAt = s.savedAt || null;
+
+    setText(s.text || '', { immediate: true, markDirty: false });
+
+    /* Set, not marked. The shell already knows this tab's dirty state — it is
+       what it just told us — so routing it back through markDirty would post
+       a `dirty` message describing a change that never happened. */
+    state.dirty = !!s.dirty;
+    el.body.classList.toggle('dirty', state.dirty);
+
+    undoStack.length = 0;
+    redoStack.length = 0;
+    if (!opts.fresh) {
+      Array.prototype.push.apply(undoStack, s.undo || []);
+      Array.prototype.push.apply(redoStack, s.redo || []);
+    }
+    undoAt = 0; undoStepAt = 0;
+
+    invalidateAnchors();
+    updateStatus();
+    staggerBlocks();
+
+    /* Scroll and caret after the frame. The panes have not grown to the new
+       document's height yet, so a write now is clamped by whatever the old
+       document's scrollHeight allowed — which, for a short document arriving
+       after a long one, is nothing. */
+    var sel = s.sel;
+    requestAnimationFrame(function () {
+      autosizeSrc();
+      setScroll('prev', s.scrollPrev || 0);
+      setScroll('src', s.scrollSrc || 0);
+      if (state.mode === 'split') {
+        el.src.focus();
+        el.src.setSelectionRange(sel ? sel.start : 0, sel ? sel.end : 0);
+      }
+    });
+
+    /* The document as it stands is the baseline for its history. Harmless on
+       a tab that already has one: histSnapshot returns early when the text
+       matches the head it is already holding. */
+    histSnapshot(true);
+  }
+
   var LIST_RE = /^(\s*)(?:([-*+])|(\d+)([.)]))(\s+)(\[[ xX]\]\s+)?(.*)$/;
   var QUOTE_RE = /^(\s*)(>+)(\s?)(.*)$/;
 
@@ -1644,8 +1758,14 @@ window.MM = (function () {
     var pad = parseFloat(getComputedStyle(document.documentElement)
                            .getPropertyValue('--bar-pad')) || 10;
 
+    /* Split view normally hangs the bar off the middle of the top edge. While
+       the tab strip is out that would put the three window buttons in the
+       middle of a row of tabs, so the bar comes back to the corner for as
+       long as the strip is showing and springs back to the divider when it
+       goes. The transform is already spring-eased, so the move reads as the
+       bar being drawn along by the strip rather than as a jump. */
     var x = 0;
-    if (state.mode === 'split') {
+    if (state.mode === 'split' && !el.body.classList.contains('tabs-open')) {
       var d = barDivider && barDivider.getBoundingClientRect();
       var centre = (d && d.width > 0) ? d.left + d.width / 2 : window.innerWidth / 2;
       x = Math.round(centre - w / 2);
@@ -2453,7 +2573,9 @@ window.MM = (function () {
     typewriterSplit: typewriterSplit, typewriterLive: typewriterLive,
     currentLineIndex: currentLineIndex, stats: stats,
     setScroll: setScroll, invalidateAnchors: invalidateAnchors,
-    onDocRendered: null, onPreviewScroll: null
+    sessionCapture: sessionCapture, sessionRestore: sessionRestore,
+    sessionBlank: sessionBlank,
+    onDocRendered: null, onPreviewScroll: null, onDirty: null
   };
   return MM;
 })();

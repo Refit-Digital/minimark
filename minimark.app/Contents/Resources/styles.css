@@ -31,6 +31,21 @@
   --bar-x:      0px;
   --bar-pad:    10px;
   --bar-r:      12px;   /* only on the corners that hang free */
+
+  /* The tab strip is the same slab as the bar, run out to both edges of the
+     window: same height, same colour, same weld to the top edge. It is not a
+     second piece of chrome, it is the first one grown wide, which is why it
+     borrows --bar-h rather than declaring a height of its own.
+
+     --tab-inset is what it leaves clear on the left for the window buttons:
+     --bar-pad, then the 52px the three of them come to, then --bar-pad again.
+     The bar's grip is hidden while the strip is open, so its 17px and the 14px
+     before it are not reserved — the grip moves to the far right of the strip,
+     onto the empty run that is the drag handle once tabs are showing. */
+  --tab-inset:  72px;   /* 10 + 52 + 10 */
+  --tab-min:    96px;
+  --tab-max:    186px;
+  --tab-r:      9px;
   /* The panes run edge to edge and the top of the window is transparent, so
      text stays visible right up to the edge. The strip over it takes the
      mouse but paints almost nothing: only a small grip panel behind the
@@ -279,6 +294,194 @@ body[data-mode="split"] #titlebar::after {
 /* full screen hides the buttons, and there is nothing left to hold */
 body.no-titlebar { --titlebar-h: 0px; --fade-h: 16px; }
 body.no-titlebar #titlebar { display: none; }
+
+
+/* ============================================================
+   the tab strip
+   ============================================================ */
+/* Several documents open at once, and none of them on screen until you ask.
+   The strip is the chrome bar grown wide: same height, same colour, same weld
+   to the top edge of the window, so when it arrives the two are one slab
+   rather than two objects sharing a row. It is off screen the rest of the
+   time, which is the whole point — a writer looking at one document should
+   not be looking at a list of the others.
+
+   Reveal is a pointer gesture at the top edge, driven by a native tracking
+   area rather than by the page: the top 8px of the window belong to a real
+   AppKit drag strip, so a mousemove listener here never sees a pointer that
+   has only just arrived. JS still watches the band below that as a backstop.
+
+   While it is open the chrome bar glides to the corner in both view modes —
+   in split it normally sits on the pane divider, which would put the window
+   buttons in the middle of the strip. It springs back when the strip goes. */
+#tabbar {
+  position: fixed; top: 0; left: 0; right: 0;
+  height: var(--bar-h);
+  display: flex; align-items: stretch;
+  padding-left: var(--tab-inset);
+  background: var(--bar-bg);
+  z-index: 60;
+  -webkit-user-select: none; user-select: none;
+  /* Off screen, not merely transparent: a hidden strip must not eat the
+     clicks of the document it is parked over. */
+  transform: translateY(-100%);
+  pointer-events: none;
+  transition: transform 300ms var(--ease-spring),
+              background-color 420ms var(--ease-soft);
+}
+body.tabs-open #tabbar { transform: translateY(0); pointer-events: auto; }
+
+/* Zen takes the chrome away, but a deliberate reach for the top edge is a
+   request for it back — the same gesture that already un-hides the bar. */
+body.tabs-open #titlebar { opacity: 1; pointer-events: auto; }
+
+/* The bar stops being a free-standing object while the strip is out: no
+   radius where the slab continues, no fillets, and no grip, because the grip
+   moves to the empty run at the far end where the drag region now is. */
+body.tabs-open #titlebar { width: var(--tab-inset); }
+body.tabs-open .tb-grip { border-radius: 0; }
+/* The hover rule below has to be beaten explicitly, or the dots come back
+   under the pointer on a bar that is no longer a handle in its own right. */
+body.tabs-open .tb-grip::after,
+body.tabs-open #titlebar:hover .tb-grip::after { opacity: 0; }
+body.tabs-open #titlebar::before,
+body.tabs-open #titlebar::after { display: none; }
+
+/* Full screen has no window buttons, so nothing to leave clear for. */
+body.no-titlebar #tabbar { padding-left: var(--bar-pad); }
+
+/* Sized to its tabs, not to the strip. Anything left over belongs to #tabRest,
+   which is the part the shell parks a drag region over — a gap here would be
+   a stretch of strip that neither picks the window up nor does anything else. */
+#tabs {
+  flex: 0 1 auto; min-width: 0;
+  display: flex; align-items: stretch; gap: 1px;
+  overflow-x: auto; overflow-y: hidden;
+  scrollbar-width: none;
+}
+#tabs::-webkit-scrollbar { display: none; }
+
+.tab {
+  position: relative;
+  flex: 0 1 var(--tab-max);
+  min-width: var(--tab-min);
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 8px 0 11px;
+  border-radius: var(--tab-r) var(--tab-r) 0 0;
+  font-family: var(--ui); font-size: 11.5px; font-weight: 550;
+  letter-spacing: -.005em; color: var(--muted);
+  white-space: nowrap; overflow: hidden;
+  cursor: default;
+  transition: background-color 160ms var(--ease-soft), color 160ms var(--ease-soft);
+}
+.tab:hover { background: var(--hover); }
+
+/* The open document is a piece of the page that has been pulled up into the
+   strip, so it takes the paper's own colour and its ink. */
+/* Paper, and the page's own texture with it: Cork and Steel carry one, and a
+   flat tab welded to a textured page reads as a sticker rather than as a
+   piece of that page brought up. The tile is anchored to the tab rather than
+   to the body, so the two are half a tile out of step — at this grain, and
+   over 32px, that is not a thing anyone can see. */
+.tab.on {
+  background-color: var(--paper);
+  background-image: var(--tex);
+  background-blend-mode: var(--tex-blend);
+  background-size: var(--tex-size);
+  background-repeat: repeat;
+  color: var(--ink);
+}
+
+/* …and its bottom corners flare outwards into the strip rather than meeting
+   it square, so the tab reads as continuous with the document below it. Same
+   trick as the bar's split-view fillets: border-radius only ever bulges
+   towards its own corner, so a concave one has to be drawn as a quarter disc
+   cut out of a square hung just outside the box. */
+.tab.on::before, .tab.on::after {
+  content: ''; position: absolute; bottom: 0;
+  width: var(--tab-r); height: var(--tab-r);
+  pointer-events: none;
+}
+.tab.on::before {
+  left: calc(var(--tab-r) * -1);
+  background: radial-gradient(circle var(--tab-r) at 0 0,
+                              transparent calc(100% - 0.5px), var(--paper) 100%);
+}
+.tab.on::after {
+  right: calc(var(--tab-r) * -1);
+  background: radial-gradient(circle var(--tab-r) at 100% 0,
+                              transparent calc(100% - 0.5px), var(--paper) 100%);
+}
+
+.tab .name {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Unsaved. The same 5px dot the status bar uses for the same meaning, and it
+   gives way to the close button when the pointer arrives, so the two never
+   compete for the one slot. */
+.tab .dot {
+  flex: none; width: 5px; height: 5px; border-radius: 50%;
+  background: currentColor; opacity: .5;
+  display: none;
+}
+.tab.dirty .dot { display: block; }
+.tab.dirty:hover .dot { display: none; }
+
+.tab .x {
+  flex: none;
+  width: 16px; height: 16px; margin-right: -3px;
+  display: none; place-items: center;
+  border: 0; padding: 0; border-radius: 4px;
+  background: transparent; color: inherit;
+  opacity: .6;
+  transition: opacity 140ms var(--ease-soft), background-color 140ms var(--ease-soft);
+}
+.tab:hover .x { display: grid; }
+.tab .x:hover { opacity: 1; background: var(--rule-strong); }
+.tab .x svg { width: 9px; height: 9px; }
+
+/* Dragging one along the strip. The tab is lifted out of the flow visually
+   only — its slot stays where it is and the others slide around it, so the
+   layout never reflows underneath the pointer. */
+.tab.dragging {
+  z-index: 3; opacity: .92;
+  transition: none;
+  box-shadow: var(--shadow-sm);
+}
+.tab.sliding { transition: transform 180ms var(--ease-soft); }
+
+#tabAdd {
+  flex: none; align-self: center;
+  width: 24px; height: 24px; margin: 0 2px;
+  display: grid; place-items: center;
+  border: 0; padding: 0; border-radius: 6px;
+  background: transparent; color: var(--muted);
+  opacity: .6;
+  transition: opacity 160ms var(--ease-soft), background-color 160ms var(--ease-soft);
+}
+#tabAdd:hover { opacity: 1; background: var(--hover); }
+#tabAdd svg { width: 13px; height: 13px; }
+
+/* Everything past the last tab. Nothing is drawn here but the grip, and the
+   native shell parks its drag region over exactly this rectangle, so the
+   empty end of the strip picks the window up the way the bar does. */
+#tabRest { flex: 1 1 auto; min-width: 26px; position: relative; }
+
+.tab-grip {
+  position: absolute; right: var(--bar-pad); top: 50%;
+  width: 17px; height: 10px; margin-top: -5px;
+  background-image:
+    radial-gradient(circle 1px at 1px 1px, var(--bar-dot) 100%, transparent 0),
+    radial-gradient(circle 1px at 1px 1px, var(--bar-dot) 100%, transparent 0),
+    radial-gradient(circle 1px at 1px 1px, var(--bar-dot) 100%, transparent 0);
+  background-repeat: repeat-x, repeat-x, repeat-x;
+  background-size: 5px 2px, 5px 2px, 5px 2px;
+  background-position: 2.5px 0, 0 4px, 2.5px 8px;
+  opacity: .35; transition: opacity 200ms var(--ease-soft);
+}
+#tabRest:hover .tab-grip { opacity: .8; }
 
 
 .doc-title {
@@ -1086,7 +1289,7 @@ body.zen #themePop, body.zen #help { bottom: 14px; }
   }
 
   /* app chrome has no business on paper */
-  #titlebar, #status, #scrub, #scrubLabel, #find, #findHL, #pickerWrap,
+  #titlebar, #tabbar, #status, #scrub, #scrubLabel, #find, #findHL, #pickerWrap,
   #themePop, #bubble, #help, #toast, #divider, #sweep, #sourcePane {
     display: none !important;
   }

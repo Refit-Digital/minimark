@@ -8,6 +8,19 @@
 </head>
 <body data-mode="split">
 
+  <!-- Open documents. Off screen until the pointer reaches the top edge of the
+       window, at which point it slides down and the chrome bar glides into the
+       corner to meet it, so the two read as one slab welded to that edge. -->
+  <nav id="tabbar" aria-label="Open documents">
+    <div id="tabs" role="tablist"></div>
+    <button type="button" id="tabAdd" aria-label="New tab" title="New tab  ⌘T">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+        <path d="M8 3.6v8.8M3.6 8h8.8"/>
+      </svg>
+    </button>
+    <div id="tabRest"><span class="tab-grip"></span></div>
+  </nav>
+
   <div id="titlebar"><span class="tb-grip"></span></div>
 
   <main id="stage">
@@ -162,6 +175,11 @@
       <span>Undo<kbd>⌘Z</kbd></span>
       <span>Redo<kbd>⇧⌘Z</kbd><kbd>⌘Y</kbd></span>
       <span>Split block at caret<kbd>⌘⏎</kbd></span>
+      <span>New tab<kbd>⌘T</kbd></span>
+      <span>Close tab<kbd>⌘W</kbd></span>
+      <span>Next tab<kbd>⌃⇥</kbd><kbd>⇧⌘]</kbd></span>
+      <span>Previous tab<kbd>⌃⇧⇥</kbd><kbd>⇧⌘[</kbd></span>
+      <span>Keep tabs showing<kbd>⌃⌥T</kbd></span>
       <span>New<kbd>⌘N</kbd></span>
       <span>Open<kbd>⌘O</kbd></span>
       <span>Save<kbd>⌘S</kbd></span>

@@ -51,6 +51,12 @@ Every message carries a `type` field.
 | `zenReveal` | `{on: Bool}` | temporarily reveal the chrome bar during zen, when the pointer comes near it or the page is scrolled up |
 | `barX` | `{x, w, h}` | `x` is where the window buttons go, in CSS px from the left; `w`/`h` are the bar's drawn size. Sent whenever any of the three changes: mode switch, resize, launch. Move and resize the buttons and the bar's drag strip to match |
 | `dragWindow` | `{x, y}` screen coords | **new.** Begin a window drag. See "the window" below |
+| `tabNew` | — | create a new untitled tab and bring it forward |
+| `tabSelect` | `{id}` | bring that tab forward |
+| `tabClose` | `{id}` | close it, saving or asking first as needed. Closing the last tab closes the window |
+| `tabMove` | `{id, to}` | reorder. `to` is the destination index |
+| `tabsOpen` | `{on: Bool}` | the tab strip is out, or has gone. Grows the peek probe's band and overrides zen's hiding of the chrome |
+| `tabDrag` | `{x, w, h}` | the empty run past the last tab, in CSS px. Park the third drag region over it; `w: 0` means there is none |
 
 ### Native to web
 
@@ -59,13 +65,15 @@ completion handler.
 
 | Call | Notes |
 |---|---|
-| `App.loadDoc(text, name, dir)` | `dir` is the containing folder path, used to resolve relative image paths |
-| `App.getText()` | returns the current markdown. Use this for save and autosave |
-| `App.getHTML()` | returns rendered HTML, for Export as HTML |
-| `App.setSaved(name, dir)` | after a successful save |
-| `App.autoSaved()` | after a successful autosave, updates the "saved 14:32" label |
-| `App.externalChange(text)` | when the file changes on disk underneath us |
-| `App.renamed(name)` | after a rename |
+| `App.loadDoc(text, name, dir, id?)` | `dir` is the containing folder path, used to resolve relative image paths. With an `id` that is not the tab in front, the document is parked in that tab rather than shown — which is how a session is restored, and how a file opened into a new tab arrives with its text already there instead of flashing empty while two messages cross |
+| `App.getText(id?)` | returns the markdown of that tab, or of the one in front. `null` for a tab it does not have, which must be treated as "could not read it" and never written to disk |
+| `App.getHTML()` | returns rendered HTML, for Export as HTML. The tab in front only |
+| `App.setSaved(name, dir, id?)` | after a successful save |
+| `App.autoSaved(id?)` | after a successful autosave, updates the "saved 14:32" label |
+| `App.externalChange(text, id?)` | when the file changes on disk underneath us |
+| `App.renamed(name, id?)` | after a rename |
+| `App.setTabs(list)` | the whole tab list: `[{id, name, dir, dirty, active}]`. Sent on every change to it. The web layer reconciles against this rather than merging with it, so the shell is always the authority on which documents exist and which is in front |
+| `App.setPeek(on)` | the pointer has entered or left the band along the top of the window |
 | `App.setFullscreen(on)` | on enter/exit full screen |
 | `App.setPrefs({...})` | all persisted prefs at once, values as strings |
 | `App.setSystemTheme('dark' or 'light')` | at launch and whenever the system appearance changes |
@@ -80,8 +88,8 @@ This is half the point of the rebuild. Every item below should fire
 **minimark**: About, Settings (opens `themes`), Hide, Quit
 
 **File** *(native actions, also reachable as `menu` messages)*: New `⌘N`,
-Open `⌘O`, Save `⌘S`, Save As `⇧⌘S`, Rename, Export as HTML, Reveal in Finder,
-Close `⌘W`
+New Tab `⌘T`, Open `⌘O`, Save `⌘S`, Save As `⇧⌘S`, Rename, Export as HTML,
+Reveal in Finder, Close Tab `⌘W`, Close Window `⇧⌘W`
 
 **Edit**: Undo `⌘Z`, Redo `⇧⌘Z`, Cut/Copy/Paste, Copy as Rich Text `⌥⌘C`
 (`copyRich`), Find `⌘F` (`find`), Find Next `⌘G` (`findNext`), Find Previous
@@ -107,9 +115,15 @@ Close `⌘W`
 **View**: Split `⌘1` (`split`), Live `⌘2` (`live`), Toggle Mode `⇧⌘M`
 (`toggleMode`), Zen `⌃⌥Z` (`zen`), Focus `⇧⌘D` (`focus`), Typewriter `⇧⌘T`
 (`typewriter`), Bigger Text `⌘+` (`bigger`), Smaller Text `⌘-` (`smaller`),
-Actual Size `⌘0` (`resetSize`), Appearance `⇧⌘L` (`themes`), Enter Full Screen
+Actual Size `⌘0` (`resetSize`), Appearance `⇧⌘L` (`themes`), Keep Tabs Showing
+`⌃⌥T` (`toggleTabs`, a checkmark item reading the `tabsPin` pref), Enter Full
+Screen
 
 **Go**: Command Palette `⌘P` (`palette`), Jump to Heading `⌘R` (`headings`)
+
+**Window**: Minimize `⌘M`, Zoom, Show Next Tab `⌃⇥` (`nextTab`), Show Previous
+Tab `⌃⇧⇥` (`prevTab`). `⇧⌘]` and `⇧⌘[` do the same and are handled in the web
+layer, which is the only way to have both pairs without two more menu items.
 
 **Help**: Markdown Reference `⌘/` (`help`)
 
@@ -187,13 +201,60 @@ Do not worry about double-firing; the commands are idempotent.
   `window.performWindowDragWithEvent(_:)`. The native strip is cleaner; the
   message is already being sent either way.
 
+## The tab strip
+
+Several documents open at once, in one window, with the strip that lists them
+kept off screen until the pointer reaches the top edge.
+
+- **Who owns what.** The shell owns the tabs, because it owns the files: the
+  list, the order, the paths, the dirty flags, autosave and the watcher. The
+  web layer owns a *session* per tab — text, both undo stacks, both panes'
+  scroll positions, the caret — because those are what make coming back to a
+  tab feel like not having left it, and because shipping a 500-entry undo
+  stack over the bridge on every switch would cost megabytes for something
+  neither side needs to persist. The two halves meet at `id` and nothing else.
+- **Reveal is native.** The top `kEdgeGrip` pixels belong to a real drag
+  strip, so a `mousemove` listener in the page never sees a pointer that has
+  only just arrived at the edge. A `PeekProbe` — an `NSView` that returns
+  `nil` from `hitTest` and carries nothing but an `NSTrackingArea` — reports
+  the pointer with `App.setPeek(on)`. It takes no clicks from anything below
+  it: a tracking area is geometry, not hit testing. The page keeps a
+  `mousemove` backstop for the rest of the band.
+- **The band grows with the strip**, from `kPeekBand` to `kPeekBandOpen`, so a
+  pointer that has moved down onto a tab is still "at the top edge" and the
+  strip does not shut under it. `tabsOpen` is what drives that.
+- **The strip is the bar grown wide.** Same height, same `--bar-bg`, same weld
+  to the top edge. While it is out the chrome bar comes to the corner in both
+  view modes — in split it normally sits on the pane divider, which would put
+  the window buttons in the middle of a row of tabs — and it narrows to
+  `--tab-inset`, so `barX` carries 72 rather than 103 and the drag region
+  stops where the first tab starts.
+- **Three drag regions now.** The bar's, the thin top edge, and one over the
+  empty run past the last tab, placed from `tabDrag`. Dragging a window by the
+  blank part of its tab bar is muscle memory, and the web layer cannot move
+  its own window.
+- **Session.** `openDocumentPaths` and `activeDocumentIndex` replace the single
+  `lastDocumentPath`, which is still written alongside. Untitled documents are
+  deliberately not persisted: there is nowhere to put their text, and
+  reopening an empty tab where a page of writing used to be is worse than not
+  reopening it.
+- **`tabsPin`** keeps the strip permanently visible for anyone who would
+  rather see it.
+
 ## Behaviours to preserve
 
 - **Autosave.** The old build debounced it with a `DispatchWorkItem`. Pull text
-  with `App.getText()`, write, then call `App.autoSaved()`. Only once the
-  document has a path; a never-saved Untitled has nowhere to go.
-- **File watching.** An `NSTimer` polled the file's modification date and called
-  `App.externalChange(text)` when it changed underneath. Keep this.
+  with `App.getText(id)`, write, then call `App.autoSaved(id)`. Every dirty tab
+  with a path, not only the one on screen — otherwise an edit made and then
+  switched away from stays unwritten until you come back to it, which with
+  several tabs open could be never. Only tabs that have a path; a never-saved
+  Untitled has nowhere to go.
+- **File watching.** An `NSTimer` polls each open file's modification date and
+  calls `App.externalChange(text, id)` when it changes underneath. A clean
+  document is simply brought up to date wherever it is. One with unsaved
+  changes is only asked about when it is the tab in front, and its stored
+  modification date is deliberately left alone until then, so the question is
+  still waiting when you come back to it.
 - **Restore on launch.** Read prefs, send `App.setPrefs`, reopen the last
   document. The `scroll` pref is a 0-1000 integer the web layer uses to restore
   scroll position.
@@ -231,3 +292,13 @@ listing the message types in both directions back to me. Then write the file.
 - [ ] Theme, typeface, text size, zen, focus, typewriter and mode all survive a relaunch
 - [ ] Version history survives a relaunch (it rides in the `history` pref)
 - [ ] Pasting an image saves it next to the document and inserts a relative link
+- [ ] The tab strip is invisible until the pointer reaches the top edge, and
+      goes again when it leaves
+- [ ] Tabs switch instantly and each one keeps its own undo history, scroll
+      position and caret
+- [ ] Editing a tab, switching away and waiting a second writes that tab's file
+- [ ] `⌘W` closes the tab and only closes the window on the last one
+- [ ] Opening a file that is already in a tab brings that tab forward
+- [ ] The open documents come back after a relaunch, with the right one in front
+- [ ] Dragging the empty end of the strip moves the window
+- [ ] `node tools/bridge-contract.js` and `node tools/tabs-test.js` both pass
