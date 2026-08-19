@@ -1,0 +1,360 @@
+# minimark development plan
+
+Written 8 August 2026. Covers the next 4 to 6 weeks.
+
+**Goal: a public open-source release on GitHub.** No monetisation, no licensing
+code, no trial, no App Store, no sandbox refactor. Three things matter instead:
+the repo has to be legally publishable, the app has to stop losing people's
+work, and a stranger has to be able to clone it and build it in one command.
+
+---
+
+## Where minimark actually is
+
+Better than expected on code quality. Worse than expected on everything that
+makes a repo public-ready. All of the below was verified against the source, not
+assumed.
+
+**Strong.** No force-unwraps, no `try!`, no `as!`, no `fatalError` anywhere in
+1,943 lines of Swift. No retain cycles. Zero debug logging in either layer. The
+whole bridge contract from `NATIVE-SHELL-BRIEF.md` is implemented in both
+directions, plus Open Recent, print, PDF export, native drag-and-drop and an
+allowlist HTML sanitiser that were never in the spec. The version history test
+suite extracts the shipped source rather than duplicating it, which is the right
+way to do it and better than most projects this size manage.
+
+**Blocking a public release.** There is no git repository at all, on 5,000 lines
+of working code, with two dated backup folders doing that job badly. There is no
+`LICENSE`, no `README`, no `NOTICES`. Third-party licence headers have been
+stripped from three of the four vendor files. `test-images/node_modules/` is
+committed. `test-history/mod.js` is a generated artefact sitting next to its
+sources. Three of the four image tests hardcode a dead sandbox path from a
+previous session and throw `ENOENT` on any machine, so that suite has been
+silently non-functional. The build recipe is a two-line comment at the top of
+`minimark.swift` and produces an arm64-only binary that will not launch on an
+Intel Mac. `minimark-build/icon/` is empty and there is no icon source anywhere.
+
+**Dangerous.** `readText` at `minimark.swift:919` falls back to
+`String(decoding:as:)`, which silently substitutes replacement characters for
+undecodable bytes. Open a Latin-1 or UTF-16-without-BOM file, type one
+character, and the autosave a second later overwrites the original with the
+mangled text. There is no undo for that on disk. Separately, a save failure
+during autosave pops a modal sheet, and because the document stays dirty every
+keystroke reschedules, so a file on an ejected volume produces an alert roughly
+once a second.
+
+---
+
+## Decisions made
+
+### Licence: GPL-3.0
+
+Any fork that ships must also ship its source. Three consequences to plan
+around:
+
+- **The four dependencies are all compatible.** marked (MIT), KaTeX (MIT),
+  Turndown (MIT) and highlight.js (BSD-3-Clause) are permissive and can be
+  combined into a GPL-3.0 work. Their notices still have to be preserved
+  alongside yours, which is what `NOTICES.md` in Phase 0 is for. GPL-3.0 on your
+  code does not replace their attribution requirements, it sits on top of them.
+- **The Mac App Store door is now closed.** Apple's terms conflict with GPL-3.0.
+  Not a loss given the direction, but worth knowing it is a one-way choice
+  unless you relicense.
+- **Relicensing gets hard the moment someone else contributes.** Today you are
+  the sole copyright holder and can change your mind freely. Once outside
+  patches land, you cannot relicense without every contributor's agreement. If
+  you want to keep that option open, you would need a contributor licence
+  agreement, which most projects this size skip and which adds friction for
+  contributors. Reasonable either way, but decide before the first pull request
+  rather than after.
+
+### Notarisation: skipped
+
+No Apple Developer Program, no £79 a year. This is fine, but the friction is
+worse than it used to be and the README has to be accurate about it.
+
+**Keep the ad-hoc signature.** `codesign --sign -` must stay in the build
+script. Since macOS 15.1, a genuinely *unsigned* app is blocked outright with
+"The application does not have permission to open" and no override anywhere. An
+ad-hoc signed app is still signed, just not with a Developer ID, so it keeps the
+override path. Dropping the signing step to save a line would make the app
+unopenable.
+
+**The right-click Open trick is gone.** macOS Sequoia removed the Control-click
+bypass. The current path is System Settings, Privacy & Security, scroll to
+Security, Open Anyway, then confirm. That is what goes in the README, not the
+old advice.
+
+**Building from source has no friction at all.** No quarantine attribute is ever
+set, so nothing to bypass. For a GPL project that is the natural primary path,
+and the `build.sh` in Phase 2 is what makes it a one-command job. Lead the
+README with it and treat the release binary as the secondary option.
+
+If you ever revisit notarisation, `build.sh` only needs `--options runtime
+--timestamp` and a `notarytool` step bolted on. Worth keeping the script shaped
+so that stays a small change.
+
+---
+
+## Phase 0, week 1: make the repo publishable
+
+Nothing else can happen until this is done, and none of it is hard.
+
+- [ ] `git init`, first commit, push to GitHub. Do the first commit **before**
+      deleting anything, so the current state is recoverable.
+- [ ] `.gitignore` covering `node_modules/`, `backup-*/`, `.DS_Store`,
+      `minimark.app/Contents/MacOS/minimark`, `test-history/mod.js`, `build/`.
+      Note that the compiled binary should not be committed, which means the
+      build script in Phase 2 is what makes the repo usable, not optional.
+- [ ] `git rm -r --cached test-images/node_modules` and add a `package.json` so
+      contributors run `npm install` instead. There is already a `.gitignore`
+      listing `node_modules/` in that folder, with no git repo for it to apply
+      to.
+- [ ] **`LICENSE`** containing the full GPL-3.0 text, plus a real copyright line.
+- [ ] **GPL header block** at the top of `minimark.swift`, `app.js`, `ui.js`,
+      `styles.css` and `index.html`. GPL-3.0 expects a per-file notice naming
+      the program, the copyright holder and the licence. Skipping it is common
+      and weakens the licence, so do it once now while there are five files.
+- [ ] **`NOTICES.md`** with full licence text for marked 12.0.2 (MIT), KaTeX
+      (MIT), highlight.js (BSD-3-Clause) and Turndown (MIT). BSD-3-Clause
+      requires the copyright notice and disclaimer be reproduced in accompanying
+      materials, so this is a hard requirement rather than a courtesy. Record
+      the exact version of each so upstream security advisories can be tracked.
+      Only marked currently records its version anywhere.
+- [ ] Restore the stripped licence headers in `vendor/katex.min.js`,
+      `vendor/hljs.min.js` and `vendor/turndown.js`. Confirmed stripped: the
+      hljs file begins straight into minified code with no header.
+- [ ] Add an Acknowledgements item to the About panel pointing at `NOTICES.md`.
+- [ ] **`README.md`.** Screenshot at the top, the version history feature
+      described properly because it is the genuine differentiator, then
+      **build-from-source as the primary install path** because it has no
+      Gatekeeper friction at all. Below it, the release binary with the correct
+      current instructions: System Settings, Privacy & Security, Security, Open
+      Anyway. Do not write the old right-click Open advice, it stopped working
+      in Sequoia. State plainly that minimark collects nothing and makes no
+      network requests, and that it is GPL-3.0.
+- [ ] Delete `test-history/mod.js` (generated). Fix or delete `cadence.js` and
+      `vharness.js`, which `require` `./v-old.js` and `./v-new.js`, neither of
+      which exists, and which `run.sh` does not invoke.
+- [ ] Fix the dead absolute paths in `test-images/fiximages.js:4`, `insert.js:5`
+      and `mdlink.js:2`. They point at `/sessions/epic-zen-hopper/...`. `run.sh`
+      already does `cd "$(dirname "$0")"`, so these become
+      `'../minimark.app/Contents/Resources/app.js'`. One line each.
+- [ ] Turn off the dev tools before strangers get the binary.
+      `developerExtrasEnabled` at `minimark.swift:601` and `isInspectable` at
+      `:619` are both unconditionally true. Wrap in `#if DEBUG`.
+- [ ] `Info.plist`: real `NSHumanReadableCopyright` (it is currently the literal
+      string `minimark`), `LSHandlerRank` to `Owner` for markdown so minimark
+      can actually become the default `.md` app, add
+      `NSSupportsSuddenTermination`.
+
+**Done when:** the repo can be made public without a licence problem, and
+`test-history/run.sh` and `test-images/run.sh` both pass on a clean clone.
+
+---
+
+## Phase 1, week 2: stop it eating documents
+
+These are the bugs that turn a curious first-time user into a GitHub issue
+titled "lost my file". All are small, contained fixes.
+
+- [ ] **Lossy decode into destructive autosave.** `readText` at
+      `minimark.swift:919`. Try UTF-8, then UTF-16 with BOM, then Latin-1, and
+      if all fail refuse to open rather than mangling. If a file only decoded
+      lossily, open it read-only and say so in the status bar.
+- [ ] **Autosave alert storm.** `runAutosave` at `:1073` guards the `fetchText`
+      failure but then calls `write` at `:928`, which pops a modal sheet on any
+      error. `presentError` uses `beginSheetModal`, so these queue rather than
+      coalesce. Give `write` a silent variant for the autosave path, count
+      consecutive failures, and surface one non-modal warning after the third.
+- [ ] **`confirmDiscard` can silently no-op.** At `:1014` it calls
+      `beginSheetModal(for: window)` with no visibility check, so if the window
+      is off screen the completion never runs and New, Open, Open Recent and
+      drag-open all quietly do nothing. `finishTerminate` already guards for
+      exactly this at `:561`. Apply the same guard to the other call sites:
+      `:1425`, `:1435`, `:1518`, `:608`, `:1377`, plus `saveAs` `:995`,
+      `checkFileOnDisk` `:1113`, `menuRename` `:1563`, `menuExportHTML` `:1581`,
+      `menuPageSetup` `:1635`, `menuExportPDF` `:1654`.
+- [ ] **No crash recovery for never-saved documents.** Autosave is skipped when
+      there is no path (`:1067`), and the only backstop snapshots at most once
+      per 20 seconds and flushes after 20 seconds idle. Write untitled documents
+      to `~/Library/Application Support/minimark/unsaved/` on the same debounce
+      and offer to restore on next launch.
+- [ ] **Rename sanitisation.** `renameDocument` at `:1034` strips `/` and `:`
+      but not a leading dot, so renaming to `.notes` makes the file vanish from
+      Finder with no warning.
+- [ ] **History load blocks launch.** `history.load()` runs synchronously on the
+      main thread via `pushHistory` at `:760`, and the store can reach 2 MB.
+      Move it off the main thread and send `setHistory` when it arrives.
+- [ ] **Silent history failure.** `HistoryStore.drain` at `:310` swallows every
+      error, so a full disk or a permissions problem means version history
+      quietly stops persisting forever. Surface it once.
+- [ ] **Quit watchdog can drop history.** `applicationShouldTerminate` gives the
+      web layer 2 seconds at `:521`. If `histCommit` is merely slow rather than
+      dead, `JSON.stringify` on a 2 MB store plus a cross-process round trip,
+      it quits having written nothing. Raise the budget or make the commit
+      incremental.
+
+**Done when:** you can open a Latin-1 file, save to a read-only location, and
+eject a volume mid-edit without losing data or being shouted at once per second.
+
+---
+
+## Phase 2, week 3: make it buildable by someone else
+
+For an open-source project this is the single highest-value phase. Right now the
+build instructions are a comment and the binary is not committed, so a fresh
+clone produces nothing runnable.
+
+- [ ] **`build.sh`.** Compile arm64 and x86_64 slices, `lipo` them together,
+      copy resources, ad-hoc sign, output to `build/minimark.app`. One command,
+      no Xcode project, no arguments. This replaces the comment at
+      `minimark.swift:8-11`. Keep `codesign --sign -` in it: without a signature
+      of some kind the app will not open at all on macOS 15.1 or later. Drop the
+      deprecated `--deep` and sign inside-out instead.
+- [ ] **Universal binary.** The current build is `-target arm64-apple-macos13.0`
+      only. Confirmed with `file`: it will not launch at all on an Intel Mac.
+      Add the x86_64 slice.
+- [ ] **App icon.** `minimark-build/icon/` is empty and no icon source exists
+      anywhere in the tree. Needs designing and an `.iconset` checked in so the
+      build script can generate the `.icns` rather than depending on a binary
+      blob nobody can regenerate.
+- [ ] **GitHub Actions CI.** A macOS runner that runs `build.sh` plus both test
+      suites on every push. Cheap to set up, and it is what stops the
+      dead-sandbox-path class of bug from ever recurring silently.
+- [ ] **First GitHub Release.** Tag `v1.0.0`, attach a zipped `.app`, write the
+      changelog, and repeat the Open Anyway instructions in the release notes
+      themselves. People arriving at a release page rarely read the README, and
+      an app that appears simply not to open is the fastest way to lose them.
+- [ ] **Test the ad-hoc path on a clean machine** before tagging. Download your
+      own release over the network so the quarantine attribute is actually set,
+      and walk the Open Anyway flow yourself. Verifying this by copying a file
+      locally proves nothing, because no quarantine flag gets attached.
+- [ ] `CHANGELOG.md` and a short `CONTRIBUTING.md` covering how to build, how to
+      run the tests, and the fact that the web layer and the Swift shell talk
+      over a documented bridge, pointing at `NATIVE-SHELL-BRIEF.md`.
+- [ ] Consider splitting `minimark.swift`. 1,943 lines in one file was a
+      deliberate choice in the original brief and it is fine for a solo project,
+      but it is a real barrier to outside contributions. The existing `MARK`
+      section banners already show the seams: `HistoryStore`, `EditorWebView`,
+      `DragStrip`/`RootView`/`MainWindow`, `AppDelegate`. Optional, and a
+      judgement call.
+
+**Done when:** someone clones the repo on an Intel Mac, runs `./build.sh`, and
+gets a working app.
+
+---
+
+## Phase 3, weeks 4 to 6: harden and extend
+
+With the repo public and safe, this is where the remaining time goes. Ordered by
+value.
+
+### Tests, because they are now contributor infrastructure
+
+- [ ] **Bridge contract test.** Nothing currently checks that a JS `send()` type
+      has a matching Swift `case`, or that a `js("App.x(...)")` names a function
+      that exists. Both directions are string-matched at runtime only. A script
+      that greps both sides and diffs the sets is maybe fifty lines and is the
+      cheapest high-value test available. It also protects contributors from the
+      easiest mistake to make in this codebase.
+- [ ] **Sanitiser tests.** The allowlist walk at `app.js:310-400` is
+      security-critical, carries a comment block enumerating three specific ways
+      the previous regex version was bypassed, and has no tests at all. For a
+      public repo this is the thing a security-minded reader will look at first.
+- [ ] **Markdown pipeline tests.** `md()`, `splitBlocks`, `tint`,
+      `collectLinkDefs` are all untested.
+- [ ] Fix the `names.js` divergence problem. It re-implements
+      `sanitiseFileBase` and `uniqueImageName` in JS, "transcribed line for
+      line" from the Swift, and its own header concedes the test is worthless if
+      they drift. Nothing checks that they still match.
+
+### Robustness
+
+- [ ] **File coordination.** Nothing uses `NSFileCoordinator` or
+      `NSFilePresenter`. A 2-second mtime poll (`kWatchInterval` `:53`) races a
+      1-second autosave (`kAutosaveDelay` `:52`), which will produce conflicts
+      and lost edits in iCloud Drive, Dropbox or a git worktree. Given the
+      likely audience of an open-source markdown editor, a lot of people will
+      keep their notes in exactly those places.
+- [ ] `write` uses `atomically: true` at `:930`, which replaces the inode. That
+      drops Finder tags and extended attributes, breaks hard links, and replaces
+      a symlinked path with a regular file.
+- [ ] **Document size ceiling.** On every keystroke the JS does a full-document
+      syntax tint into `innerHTML` (`app.js:784`) and a full-document regex word
+      count (`app.js:845`), then on a debounce tears down and rebuilds every
+      block (`app.js:796`). No virtualisation, no incremental parse. Find the
+      practical ceiling, document it, and guard the open path against files far
+      past it.
+- [ ] **VoiceOver.** The two `DragStrip` views at `:325-351` implement no
+      `NSAccessibility` protocol and are invisible to assistive tech.
+- [ ] `dragWindow` reads `NSApp.currentEvent` at `:866`, but `WKScriptMessage`
+      delivery is asynchronous relative to the mouse event, so it may already be
+      a different event or nil. Low impact since it is only reachable when the
+      native strip is hidden, but it is the brief's documented fallback and it
+      does not really work.
+
+### Features, ranked by value per hour
+
+1. **Alt-text prompt on image insert.** Images currently go in as bare
+   `![](name)` at `ui.js:1517`. Small change, immediately noticeable.
+2. **User CSS hook.** Six hardcoded themes at `styles.css:77-153` with no user
+   stylesheet. Cheap to add, and exactly the sort of thing an open-source
+   audience does with an editor. Likely to generate contributed themes, which is
+   free content for the project.
+3. **Table editing.** There is an insert-table snippet at `ui.js:598` and a
+   Tab-key tidy pass, but no add or delete row and column, no alignment
+   controls.
+4. **Mermaid diagrams.** KaTeX is already wired in at `app.js:287`, so the
+   pattern for a block-level renderer exists.
+5. **Multiple windows and tabs.** The biggest gap against every competitor, and
+   the biggest job. `AppDelegate` holds a single `var window: MainWindow!` at
+   `:416` and sets `tabbingMode = .disallowed` at `:596`. Document state lives
+   on the app delegate and would have to move into a per-window controller.
+   Budget two weeks on its own, not three days. Do not start this inside the six
+   weeks.
+
+Items 1 to 4 are also the natural "good first issue" set if anyone turns up
+wanting to contribute.
+
+---
+
+## Deliberately not in this plan
+
+**Monetisation, licensing, trials, App Store, sandboxing.** Not wanted, and
+GPL-3.0 rules the App Store out regardless. The sandbox refactor alone
+(security-scoped bookmarks to replace the raw path string at `:908`, scoping the
+web view's read access down from `/` at `:692`, a privacy manifest) would eat a
+week for no benefit here.
+
+**iCloud sync, iOS companion, plugin API, publishing integrations,
+localisation.** Each is a multi-month project. None can be started responsibly
+inside six weeks.
+
+**Sparkle auto-updates.** For an open-source app, GitHub Releases plus a
+"Check for Updates" menu item that opens the releases page covers it. Revisit if
+the project gets enough users that manual updating becomes a real complaint.
+
+---
+
+## Risks
+
+| Risk | Mitigation |
+|---|---|
+| Publishing before the attribution is fixed | Phase 0 is ordered first for exactly this reason. Do not make the repo public until `NOTICES.md` exists and the vendor headers are restored. GPL-3.0 on your own code does not discharge the MIT and BSD obligations |
+| Gatekeeper friction drives away the first wave of users | Lead the README with build-from-source, which has no friction. Put the correct Open Anyway steps, not the dead right-click advice, in both the README and the release notes |
+| The ad-hoc signature gets dropped from `build.sh` as tidy-up | It is load-bearing. Unsigned apps do not open at all on macOS 15.1+. Leave a comment in the script saying so |
+| A contributor lands a patch and the licence is now frozen | Decide on a CLA, or consciously accept that GPL-3.0 is permanent, before merging the first pull request |
+| The repo goes public with a broken build | CI in Phase 2 is what prevents this. Until it exists, test a clean clone by hand before tagging |
+| Tabs refactor gets started and swallows everything | It is explicitly deferred past week 6 |
+| Nobody turns up | That is a fine outcome. The app is for you first, and a finished, documented, tested native Mac app is worth having regardless of stars |
+
+---
+
+## Sources
+
+- [Sequoia removed the Control-click Gatekeeper override](https://mjtsai.com/blog/2024/07/05/sequoia-removes-gatekeeper-contextual-menu-override/)
+- [macOS 15.1 blocks genuinely unsigned apps outright](https://www.osnews.com/story/141055/bug-or-intentional-macos-15-1-completely-removes-ability-to-launch-unsigned-applications/), which is why the ad-hoc signature has to stay
+- [Opening unsigned apps on Sequoia and newer](https://wiki.hacks.guide/wiki/Open_unsigned_applications_on_macOS_Sequoia_and_newer), for the exact README wording
+- [Apple Developer Program enrolment](https://developer.apple.com/help/account/membership/program-enrollment/), if notarisation is ever revisited
+- [Sparkle project](https://sparkle-project.org/), if auto-updates come back on the table

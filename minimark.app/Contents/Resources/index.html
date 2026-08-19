@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="paper">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>minimark</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body data-mode="split">
+
+  <div id="titlebar"><span class="tb-grip"></span></div>
+
+  <main id="stage">
+    <section id="sourcePane" aria-label="Markdown source">
+      <div class="editor-stack" id="srcScroll">
+        <div class="editor-inner">
+          <pre id="findHL" aria-hidden="true"></pre>
+          <pre id="hl" aria-hidden="true"></pre>
+          <textarea id="src" spellcheck="true" autocapitalize="off" autocorrect="off"
+                    autocomplete="off" wrap="soft" aria-label="Markdown source"></textarea>
+        </div>
+      </div>
+    </section>
+
+    <div id="divider"></div>
+
+    <section id="previewPane" aria-label="Rendered document">
+      <article id="doc"></article>
+    </section>
+
+    <div id="sweep"></div>
+  </main>
+
+  <nav id="scrub" aria-label="Document outline"></nav>
+  <div id="scrubLabel"></div>
+
+  <footer id="status">
+    <div class="st-left">
+      <button type="button" class="icon-btn sm" id="themeBtn" aria-label="Appearance" title="Appearance  ⌘⇧L">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="8" cy="8" r="2.25"/>
+          <path d="M12.9 9.9a1.1 1.1 0 0 0 .22 1.21l.04.04a1.33 1.33 0 1 1-1.88 1.88l-.04-.04a1.1 1.1 0 0 0-1.21-.22 1.1 1.1 0 0 0-.67 1v.11a1.33 1.33 0 0 1-2.66 0v-.06a1.1 1.1 0 0 0-.72-1 1.1 1.1 0 0 0-1.21.22l-.04.04a1.33 1.33 0 1 1-1.88-1.88l.04-.04a1.1 1.1 0 0 0 .22-1.21 1.1 1.1 0 0 0-1-.67h-.11a1.33 1.33 0 0 1 0-2.66h.06a1.1 1.1 0 0 0 1-.72 1.1 1.1 0 0 0-.22-1.21l-.04-.04a1.33 1.33 0 1 1 1.88-1.88l.04.04a1.1 1.1 0 0 0 1.21.22h.05a1.1 1.1 0 0 0 .67-1v-.11a1.33 1.33 0 0 1 2.66 0v.06a1.1 1.1 0 0 0 .67 1 1.1 1.1 0 0 0 1.21-.22l.04-.04a1.33 1.33 0 1 1 1.88 1.88l-.04.04a1.1 1.1 0 0 0-.22 1.21v.05a1.1 1.1 0 0 0 1 .67h.11a1.33 1.33 0 0 1 0 2.66h-.06a1.1 1.1 0 0 0-1 .67z"/>
+        </svg>
+      </button>
+      <button type="button" class="icon-btn sm" id="zenBtn" aria-label="Zen mode" title="Zen mode  ⌃⌥Z">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M6.1 2.3H2.3v3.8M9.9 2.3h3.8v3.8M6.1 13.7H2.3V9.9M9.9 13.7h3.8V9.9"/>
+        </svg>
+      </button>
+      <button type="button" class="icon-btn sm" id="twBtn" aria-label="Typewriter scrolling" title="Typewriter scrolling  ⌘⇧T">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M2.4 8.4h11.2M4.3 8.4V4.1h7.4v4.3M3.1 8.4l-.7 4.3h11.2l-.7-4.3"/><path d="M5.9 11h4.2"/>
+        </svg>
+      </button>
+
+      <div class="seg" id="seg" role="tablist" aria-label="Editing mode">
+        <div class="seg-pill" id="segPill"></div>
+        <button type="button" data-mode="split" role="tab" aria-selected="true">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="1.7" y="2.7" width="12.6" height="10.6" rx="1.8"/><path d="M8 2.7v10.6"/>
+          </svg>Split</button>
+        <button type="button" data-mode="live" role="tab" aria-selected="false">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M2.6 4.2h10.8M2.6 8h7.4M2.6 11.8h9"/>
+          </svg>Live</button>
+      </div>
+    </div>
+
+    <div class="st-center">
+      <div class="doc-title" id="docTitle" title="Click to rename">
+        <span class="name" id="docName">Untitled.md</span><span class="dot"></span>
+      </div>
+    </div>
+
+    <div class="st-right">
+      <span class="st" id="stSaved"></span>
+      <span class="st click" id="stCount" title="Click to cycle"><b>0</b> words</span>
+      <span class="st" id="stPos">Ln 1</span>
+      <button type="button" class="icon-btn sm" id="helpBtn" aria-label="Markdown syntax help" title="Markdown reference  ⌘/">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="8" cy="8" r="6.3"/><path d="M6.2 6.15a1.85 1.85 0 1 1 2.4 1.77c-.42.14-.6.45-.6.86v.42"/><circle cx="8" cy="11.5" r=".72" fill="currentColor" stroke="none"/>
+        </svg>
+      </button>
+    </div>
+  </footer>
+
+  <!-- find -->
+  <div id="find">
+    <input type="text" id="findInput" placeholder="Find" spellcheck="false">
+    <span class="fcount" id="findCount">0/0</span>
+    <button type="button" id="findPrev" title="Previous (⇧⏎)">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10l4-4 4 4"/></svg>
+    </button>
+    <button type="button" id="findNext" title="Next (⏎)">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"/></svg>
+    </button>
+    <span class="div"></span>
+    <input type="text" id="replaceInput" placeholder="Replace" spellcheck="false" style="width:140px">
+    <button type="button" id="replaceOne">Replace</button>
+    <button type="button" id="replaceAll">All</button>
+    <span class="div"></span>
+    <button type="button" id="findClose" title="Close (esc)">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
+    </button>
+  </div>
+
+  <!-- command palette / heading jump -->
+  <div id="pickerWrap">
+    <div id="picker">
+      <input type="text" id="pickerInput" placeholder="Type a command" spellcheck="false" autocomplete="off">
+      <div id="pickerList"></div>
+    </div>
+  </div>
+
+  <!-- theme popover -->
+  <div id="themePop"></div>
+
+  <!-- selection formatting bubble -->
+  <div id="bubble" aria-label="Formatting"></div>
+
+  <!-- version history browser -->
+  <div id="histWrap">
+    <div id="histPanel" role="dialog" aria-label="Version history">
+      <div class="hist-head">
+        <h3>Version history</h3>
+        <span class="hist-meta" id="histMeta"></span>
+        <button type="button" class="hist-x" id="histClose" aria-label="Close">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
+        </button>
+      </div>
+      <div class="hist-body">
+        <div class="hist-col">
+          <input type="text" id="histFilter" placeholder="Filter by date or time" spellcheck="false" autocomplete="off">
+          <div id="histList" role="listbox" aria-label="Snapshots"></div>
+        </div>
+        <div id="histSide">
+          <div class="hist-side-head" id="histSideMeta"></div>
+          <pre id="histPreview" aria-label="Snapshot preview"></pre>
+        </div>
+      </div>
+      <div class="hist-foot">
+        <span class="hist-hint" id="histHint"></span>
+        <button type="button" class="hist-btn" id="histUndoBtn">Undo restore</button>
+        <button type="button" class="hist-btn primary" id="histRestoreBtn">Restore</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- markdown cheat sheet -->
+  <aside id="help" aria-label="Markdown reference">
+    <div class="help-head">
+      <h3>Markdown syntax</h3>
+    </div>
+    <div id="helpBody"></div>
+    <div class="help-foot">
+      <span>Command palette<kbd>⌘K</kbd></span>
+      <span>Print<kbd>⌘P</kbd></span>
+      <span>Find<kbd>⌘F</kbd></span>
+      <span>Jump to heading<kbd>⌘R</kbd></span>
+      <span>Switch mode<kbd>⌘⇧M</kbd></span>
+      <span>Zen mode<kbd>⌃⌥Z</kbd><kbd>⇧⌘F</kbd></span>
+      <span>Undo<kbd>⌘Z</kbd></span>
+      <span>Redo<kbd>⇧⌘Z</kbd><kbd>⌘Y</kbd></span>
+      <span>Split block at caret<kbd>⌘⏎</kbd></span>
+      <span>New<kbd>⌘N</kbd></span>
+      <span>Open<kbd>⌘O</kbd></span>
+      <span>Save<kbd>⌘S</kbd></span>
+      <span>Save as<kbd>⇧⌘S</kbd></span>
+      <span>Copy as rich text<kbd>⌥⌘C</kbd></span>
+      <span>Bold<kbd>⌘B</kbd></span>
+      <span>Italic<kbd>⌘I</kbd></span>
+      <span>Link<kbd>⌘⇧K</kbd></span>
+      <span>Inline code<kbd>⌘E</kbd></span>
+      <span>Focus mode<kbd>⌘⇧D</kbd></span>
+      <span>Text size<kbd>⌘+ / ⌘-</kbd></span>
+    </div>
+  </aside>
+
+  <div id="toast"></div>
+
+  <script src="vendor/marked.min.js"></script>
+  <script src="vendor/turndown.js"></script>
+  <script src="app.js"></script>
+  <script src="ui.js"></script>
+</body>
+</html>

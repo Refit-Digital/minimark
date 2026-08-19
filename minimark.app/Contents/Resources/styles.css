@@ -1,0 +1,1149 @@
+/* ============================================================
+   minimark — a quiet markdown editor
+   ============================================================ */
+
+/* ---------- structure ---------- */
+:root {
+  --ui:    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+  --prose: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
+  --mono:  ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+  --ease-spring: cubic-bezier(0.22, 1.00, 0.36, 1.00);
+  --ease-soft:   cubic-bezier(0.32, 0.72, 0.24, 1.00);
+  --dur:         480ms;
+
+  --titlebar-h: 28px;   /* the band the traffic lights sit in */
+  --fade-h:     30px;   /* clearance overlays keep from the top of the window */
+
+  /* The chrome bar. Geometry lives here because both the stylesheet and the
+     native shell need to agree on it: --bar-x is the bar's left edge in window
+     coordinates, and the buttons land --bar-pad further in again. ui.js writes
+     --bar-x and posts the same number over the bridge.
+
+     The width is not a round number on purpose. It is the contents measured
+     end to end — three 12px buttons on a 20px pitch, a 14px gap, then the
+     17px grip — with --bar-pad on either side. Same for the height. The
+     padding is equal on all four sides, so the numbers have to fall where the
+     contents put them. */
+  --bar-w:      103px;  /* 10 + (52 + 14 + 17) + 10 */
+  --bar-h:      32px;   /* 10 +      12       + 10 */
+
+  --bar-x:      0px;
+  --bar-pad:    10px;
+  --bar-r:      12px;   /* only on the corners that hang free */
+  /* The panes run edge to edge and the top of the window is transparent, so
+     text stays visible right up to the edge. The strip over it takes the
+     mouse but paints almost nothing: only a small grip panel behind the
+     three window buttons. */
+  --top-h:      0px;
+  --status-h:   34px;
+  --measure:    42rem;
+
+  --tex: none;
+  --tex-blend: normal;
+  --tex-size: auto;
+  --fscale: 1;
+  --usize:  1;   /* reader-controlled text size multiplier */
+}
+
+/* The chrome bar declares --bar-bg and --bar-dot alongside every other theme
+   variable, below. It is window furniture rather than paper, and macOS draws
+   window furniture a step apart from the content it frames: on a light theme
+   the bar goes darker than the page, on a dark theme lighter. Each one is its
+   own theme's paper taken that step and calmed slightly, rather than one grey
+   for the light themes and one for the dark — a neutral grey against Cork or
+   Sepia reads as a foreign object sitting on the page.
+
+   The grip dots are the same hue again, far enough from the bar to be found
+   and close enough to stay quiet. They also carry opacity .35 until hovered,
+   so they are quieter still than these values suggest. */
+
+/* textured surfaces */
+body, #sourcePane, #previewPane {
+  background-color: var(--paper);
+  background-image: var(--tex);
+  background-blend-mode: var(--tex-blend);
+  background-size: var(--tex-size);
+  background-repeat: repeat;
+}
+
+/* ============================================================
+   THEMES
+   ============================================================ */
+
+/* ---- Paper (light, warm) ---- */
+html[data-theme="paper"] {
+  --paper:#fbfbfa; --surface:#ffffff; --chrome:rgba(251,251,250,.72);
+  --bar-bg:#ededea; --bar-dot:#a5a599;
+  --ink:#1b1b19; --ink-soft:#55554f; --muted:#8d8d86; --faint:#b8b8b0;
+  --rule:rgba(0,0,0,.072); --rule-strong:rgba(0,0,0,.13); --hover:rgba(0,0,0,.045);
+  --accent:#3e63dd; --accent-soft:rgba(62,99,221,.11);
+  --code-bg:rgba(0,0,0,.042); --mark:#d4a017;
+  --shadow-lg:0 18px 48px rgba(0,0,0,.14),0 2px 8px rgba(0,0,0,.07);
+  --shadow-sm:0 1px 2px rgba(0,0,0,.06);
+  --syn-head:#b0442c; --syn-mark:#b9b9b0; --syn-link:#3e63dd; --syn-code:#2e7d5b; --syn-quote:#8a7a4e;
+  --hl-key:#a13b6d; --hl-str:#2e7d5b; --hl-num:#9a5a24; --hl-com:#a9a9a1; --hl-fn:#3e63dd; --hl-type:#7a5aa8;
+}
+
+/* ---- Sepia (light, warm cream) ---- */
+html[data-theme="sepia"] {
+  --paper:#f6f1e6; --surface:#fdfaf3; --chrome:rgba(246,241,230,.76);
+  --bar-bg:#eae3d4; --bar-dot:#ae9d76;
+  --ink:#382f24; --ink-soft:#5f5344; --muted:#8f8271; --faint:#bcae99;
+  --rule:rgba(56,47,36,.10); --rule-strong:rgba(56,47,36,.18); --hover:rgba(56,47,36,.055);
+  --accent:#9d5b2c; --accent-soft:rgba(157,91,44,.13);
+  --code-bg:rgba(56,47,36,.055); --mark:#c9962c;
+  --shadow-lg:0 18px 48px rgba(70,54,32,.16),0 2px 8px rgba(70,54,32,.08);
+  --shadow-sm:0 1px 2px rgba(70,54,32,.08);
+  --syn-head:#9d5b2c; --syn-mark:#bdb09a; --syn-link:#7a6a3d; --syn-code:#4f7256; --syn-quote:#8a7245;
+  --hl-key:#9c4f5e; --hl-str:#4f7256; --hl-num:#96602a; --hl-com:#b3a68f; --hl-fn:#7a5c33; --hl-type:#76608c;
+}
+
+/* ---- Cork (light, textured) ---- */
+html[data-theme="cork"] {
+  --paper:#e8d4a3; --surface:#f5ecd3; --chrome:rgba(232,212,163,.78);
+  --bar-bg:#d6c397; --bar-dot:#8d7847;
+  --ink:#382914; --ink-soft:#5f4a2c; --muted:#8a7148; --faint:#ad9268;
+  --rule:rgba(56,40,20,.12); --rule-strong:rgba(56,40,20,.22); --hover:rgba(56,40,20,.06);
+  --accent:#8c4527; --accent-soft:rgba(140,69,39,.15);
+  --code-bg:rgba(56,40,20,.08); --mark:#b8862b;
+  --shadow-lg:0 18px 48px rgba(60,40,16,.2),0 2px 8px rgba(60,40,16,.1);
+  --shadow-sm:0 1px 2px rgba(60,40,16,.09);
+  --syn-head:#8c4527; --syn-mark:#b6a077; --syn-link:#6d5a24; --syn-code:#3f6b45; --syn-quote:#7a622f;
+  --hl-key:#8f4460; --hl-str:#3f6b45; --hl-num:#8a5520; --hl-com:#a89572; --hl-fn:#6d5a24; --hl-type:#6a5088;
+  --tex: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='c'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.34' numOctaves='4' seed='7' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0.25'/%3E%3C/filter%3E%3Crect width='220' height='220' filter='url(%23c)' opacity='0.24'/%3E%3C/svg%3E");
+  --tex-blend: multiply;
+  --tex-size: 220px 220px;
+}
+
+/* ---- Steel (dark, brushed metal) ---- */
+html[data-theme="steel"] {
+  --paper:#23262a; --surface:#2d3136; --chrome:rgba(35,38,42,.74);
+  --bar-bg:#3e4247; --bar-dot:#7d8287;
+  --ink:#e0e4e8; --ink-soft:#adb3ba; --muted:#828990; --faint:#585f66;
+  --rule:rgba(255,255,255,.085); --rule-strong:rgba(255,255,255,.16); --hover:rgba(255,255,255,.06);
+  --accent:#8fb6d1; --accent-soft:rgba(143,182,209,.16);
+  --code-bg:rgba(255,255,255,.06); --mark:#d0ad5e;
+  --shadow-lg:0 20px 56px rgba(0,0,0,.6),0 2px 10px rgba(0,0,0,.42);
+  --shadow-sm:0 1px 2px rgba(0,0,0,.35);
+  --syn-head:#d79a72; --syn-mark:#5b636b; --syn-link:#8fb6d1; --syn-code:#69bfa4; --syn-quote:#bda874;
+  --hl-key:#cf8fb0; --hl-str:#69bfa4; --hl-num:#d8a76a; --hl-com:#626a72; --hl-fn:#8fb6d1; --hl-type:#a99ae4;
+  --tex: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='160'%3E%3Cfilter id='s'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.004 1.1' numOctaves='2' seed='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='400' height='160' filter='url(%23s)' opacity='0.34'/%3E%3C/svg%3E");
+  --tex-blend: soft-light;
+  --tex-size: 400px 160px;
+}
+
+/* ---- Ink (dark, warm) ---- */
+html[data-theme="ink"] {
+  --paper:#131315; --surface:#1c1d20; --chrome:rgba(19,19,21,.7);
+  --bar-bg:#2e2e32; --bar-dot:#6d6d72;
+  --ink:#e9e9e6; --ink-soft:#b6b6b1; --muted:#8a8a85; --faint:#5c5c58;
+  --rule:rgba(255,255,255,.082); --rule-strong:rgba(255,255,255,.15); --hover:rgba(255,255,255,.06);
+  --accent:#7b8ffa; --accent-soft:rgba(123,143,250,.16);
+  --code-bg:rgba(255,255,255,.06); --mark:#e0b83c;
+  --shadow-lg:0 20px 56px rgba(0,0,0,.55),0 2px 10px rgba(0,0,0,.4);
+  --shadow-sm:0 1px 2px rgba(0,0,0,.35);
+  --syn-head:#e08a6e; --syn-mark:#56565a; --syn-link:#7b8ffa; --syn-code:#5cc79a; --syn-quote:#c2ab6f;
+  --hl-key:#e08ab5; --hl-str:#5cc79a; --hl-num:#e0a468; --hl-com:#5f5f5c; --hl-fn:#7b8ffa; --hl-type:#b79af0;
+}
+
+/* ---- Void (dark, true black) ---- */
+html[data-theme="void"] {
+  --paper:#000000; --surface:#0e0e10; --chrome:rgba(0,0,0,.74);
+  --bar-bg:#1c1c1c; --bar-dot:#5c5c5c;
+  --ink:#d8d8d4; --ink-soft:#9d9d99; --muted:#767672; --faint:#4a4a48;
+  --rule:rgba(255,255,255,.06); --rule-strong:rgba(255,255,255,.115); --hover:rgba(255,255,255,.05);
+  --accent:#8e9bff; --accent-soft:rgba(142,155,255,.14);
+  --code-bg:rgba(255,255,255,.045); --mark:#cfa838;
+  --shadow-lg:0 20px 60px rgba(0,0,0,.8),0 2px 10px rgba(0,0,0,.6);
+  --shadow-sm:0 1px 2px rgba(0,0,0,.5);
+  --syn-head:#d1795d; --syn-mark:#454547; --syn-link:#8e9bff; --syn-code:#4fb289; --syn-quote:#ab9761;
+  --hl-key:#cc7ba4; --hl-str:#4fb289; --hl-num:#cc9459; --hl-com:#4f4f4d; --hl-fn:#8e9bff; --hl-type:#a58ade;
+}
+
+/* ============================================================
+   base
+   ============================================================ */
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  overflow: hidden;
+  background-color: var(--paper);
+  color: var(--ink);
+  font-family: var(--ui);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+body { transition: background-color 420ms var(--ease-soft), color 420ms var(--ease-soft); }
+::selection { background: var(--accent-soft); }
+
+/* ============================================================
+   titlebar + chrome
+   ============================================================ */
+/* The chrome is one small bar carrying the three window buttons and a grip,
+   and nothing else. The document keeps the whole width of the window: text
+   runs underneath the bar and comes out the other side at full strength.
+   Nothing is masked, dimmed or feathered at the join — the bar is opaque and
+   its edge is a clean cut, not a fade.
+
+   It is not floating. It is welded to the window: its top edge *is* the top
+   of the window, and in live view its left edge is the left of the window
+   too. Live view centres it on nothing; split view centres it on the pane
+   divider, and it follows if the divider moves. */
+#titlebar {
+  position: fixed; top: 0; left: 0;
+  width: var(--bar-w); height: var(--bar-h);
+  transform: translateX(var(--bar-x));
+  z-index: 61; background: transparent;
+  cursor: default;
+  -webkit-user-select: none; user-select: none;
+  -webkit-app-region: drag; app-region: drag;
+  transition: opacity 260ms var(--ease-soft),
+              transform 420ms var(--ease-spring);
+}
+
+/* The slab itself. Flat system gray, fully opaque: no backdrop blur, no
+   translucency, no gradient at the border, and none of the page's paper
+   texture — it is not paper. The colour alone separates it from the
+   document, so it needs no outline.
+
+   Only the corners that hang free in the document are rounded. A corner
+   sitting on a window edge is square, because there is nothing there for a
+   radius to describe — the window's own corner already does that job. In
+   live view the bar is in the top-left corner and only its bottom-right is
+   free; the radius that runs off the window gets clipped, which is what
+   welds it to the edge rather than floating it near one. */
+.tb-grip {
+  position: absolute; inset: 0;
+  border-radius: 0 0 var(--bar-r) 0;
+  background: var(--bar-bg);
+  /* Cross-fades with the page on a theme change instead of snapping a frame
+     ahead of it. Matches the transition on body. */
+  transition: background-color 420ms var(--ease-soft);
+}
+
+/* Split view hangs it off the top edge mid-window, so both bottom corners
+   are free and both get the radius. The bar keeps its live-view shape: the
+   grip stacked under the buttons was tried and made it a tall tab hanging
+   into the page, which read as a dangling label rather than as chrome. */
+body[data-mode="split"] .tb-grip { border-radius: 0 0 var(--bar-r) var(--bar-r); }
+
+/* And the two top corners, which are not corners of the bar so much as
+   junctions with the top edge of the window, turn the other way: they curve
+   outwards into that edge instead of meeting it square, so the bar reads as
+   swelling out of the window rather than as a box parked against it.
+
+   That curve is concave, which border-radius cannot cut — a radius always
+   bulges towards its corner. So each side gets a --bar-r square hung just
+   outside the bar, filled with the bar's own grey everywhere except within
+   --bar-r of its lower outer corner. The half-pixel between the two colour
+   stops is what keeps the arc from looking sawn. */
+body[data-mode="split"] #titlebar::before,
+body[data-mode="split"] #titlebar::after {
+  content: ''; position: absolute; top: 0;
+  width: var(--bar-r); height: var(--bar-r);
+}
+body[data-mode="split"] #titlebar::before {
+  left: calc(var(--bar-r) * -1);
+  background: radial-gradient(circle var(--bar-r) at 0 100%,
+                              transparent calc(100% - 0.5px), var(--bar-bg) 100%);
+}
+body[data-mode="split"] #titlebar::after {
+  right: calc(var(--bar-r) * -1);
+  background: radial-gradient(circle var(--bar-r) at 100% 100%,
+                              transparent calc(100% - 0.5px), var(--bar-bg) 100%);
+}
+
+/* The grip: three centred rows of 3, 4 and 3 dots, sitting --bar-pad in from
+   the right edge exactly as the buttons sit --bar-pad in from the left. Three
+   identical dot layers, each repeating along its own row; the 3-dot rows are
+   nudged half a pitch across so the cluster centres on the 4-dot row, and the
+   fourth dot of those rows falls outside the box and is clipped away.
+   Barely there until the pointer arrives. */
+.tb-grip::after {
+  content: ''; position: absolute;
+  right: var(--bar-pad); top: 50%;
+  width: 17px; height: 10px; margin-top: -5px;
+  background-image:
+    radial-gradient(circle 1px at 1px 1px, var(--bar-dot) 100%, transparent 0),
+    radial-gradient(circle 1px at 1px 1px, var(--bar-dot) 100%, transparent 0),
+    radial-gradient(circle 1px at 1px 1px, var(--bar-dot) 100%, transparent 0);
+  background-repeat: repeat-x, repeat-x, repeat-x;
+  background-size: 5px 2px, 5px 2px, 5px 2px;
+  background-position: 2.5px 0, 0 4px, 2.5px 8px;
+  opacity: .35; transition: opacity 200ms var(--ease-soft);
+}
+#titlebar:hover .tb-grip::after { opacity: .8; }
+
+/* full screen hides the buttons, and there is nothing left to hold */
+body.no-titlebar { --titlebar-h: 0px; --fade-h: 16px; }
+body.no-titlebar #titlebar { display: none; }
+
+
+.doc-title {
+  max-width: 40vw; min-width: 0;
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11.5px; font-weight: 550; letter-spacing: -.005em;
+  color: var(--muted);
+  white-space: nowrap; overflow: hidden;
+  cursor: text;
+  padding: 3px 9px; border-radius: 6px;
+  transition: background-color 150ms, color 150ms, box-shadow 150ms;
+}
+.doc-title:hover { background: var(--hover); color: var(--ink-soft); }
+.doc-title .name { overflow: hidden; text-overflow: ellipsis; outline: none; min-width: 1ch; }
+.doc-title.editing {
+  background: var(--surface); color: var(--ink);
+  box-shadow: 0 0 0 1px var(--accent), 0 0 0 4px var(--accent-soft);
+}
+.doc-title.editing .name { -webkit-user-select: text; user-select: text; }
+
+.doc-title .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--faint); opacity: 0; transform: scale(.4); flex: 0 0 auto;
+  transition: opacity 260ms var(--ease-spring), transform 260ms var(--ease-spring);
+}
+body.dirty .doc-title .dot { opacity: 1; transform: scale(1); background: var(--accent); }
+
+/* segmented control */
+.seg {
+  position: relative; display: flex; align-items: center;
+  padding: 2px; background: var(--hover); border-radius: 7px; height: 24px;
+  margin-left: 4px;
+}
+.seg-pill {
+  position: absolute; top: 2px; left: 2px; height: calc(100% - 4px);
+  border-radius: 6px; background: var(--surface);
+  box-shadow: var(--shadow-sm), 0 0 0 .5px var(--rule-strong);
+  transition: transform 420ms var(--ease-spring), width 420ms var(--ease-spring);
+  will-change: transform, width;
+}
+.seg button {
+  position: relative; z-index: 1;
+  appearance: none; border: 0; background: none;
+  font-family: var(--ui); font-size: 10.5px; font-weight: 550; letter-spacing: .01em;
+  color: var(--muted); padding: 0 9px; height: 100%; min-width: 50px;
+  border-radius: 6px; cursor: pointer;
+  transition: color 240ms var(--ease-soft);
+  display: flex; align-items: center; justify-content: center; gap: 5px;
+}
+.seg button[aria-selected="true"] { color: var(--ink); }
+.seg button svg { width: 11.5px; height: 11.5px; opacity: .85; }
+
+.icon-btn {
+  appearance: none; border: 0; background: none;
+  width: 28px; height: 28px; display: grid; place-items: center;
+  border-radius: 7px; color: var(--muted); cursor: pointer;
+  transition: background-color 180ms var(--ease-soft), color 180ms var(--ease-soft), transform 180ms var(--ease-spring);
+}
+.icon-btn:hover { background: var(--hover); color: var(--ink); }
+.icon-btn:active { transform: scale(.92); }
+.icon-btn svg { width: 15px; height: 15px; }
+.icon-btn.on { color: var(--accent); background: var(--accent-soft); }
+.icon-btn.sm { width: 24px; height: 24px; border-radius: 6px; }
+.icon-btn.sm svg { width: 13.5px; height: 13.5px; }
+
+/* ============================================================
+   stage
+   ============================================================ */
+#stage {
+  position: fixed; top: var(--top-h); bottom: var(--status-h); left: 0; right: 0;
+  display: flex; overflow: hidden;
+  transition: top 320ms var(--ease-spring), bottom 320ms var(--ease-spring);
+}
+
+#sourcePane {
+  position: relative; flex: 1 1 0; min-width: 0; overflow: hidden;
+  transition: flex-grow var(--dur) var(--ease-spring), opacity 300ms var(--ease-soft),
+              filter 340ms var(--ease-soft), transform 420ms var(--ease-spring);
+  will-change: flex-grow, opacity, transform;
+}
+#divider {
+  flex: 0 0 auto; width: 1px; background: var(--rule); transform-origin: center;
+  transition: opacity 260ms var(--ease-soft), transform 380ms var(--ease-spring), width var(--dur) var(--ease-spring);
+}
+#previewPane {
+  position: relative; flex: 1 1 0; min-width: 0;
+  overflow-y: auto; overflow-x: hidden;
+}
+body[data-mode="live"] #sourcePane {
+  flex-grow: .0001; opacity: 0; filter: blur(8px);
+  transform: translateX(-28px) scale(.985); pointer-events: none;
+}
+body[data-mode="live"] #divider { opacity: 0; transform: scaleY(.2); width: 0; }
+
+/* ============================================================
+   raw pane
+   ============================================================ */
+.editor-stack, #previewPane { overflow-anchor: none; }
+.editor-stack { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; }
+.editor-inner { position: relative; min-height: 100%;
+                padding: calc(34px + var(--titlebar-h)) 34px 45vh 34px;
+                transition: padding 320ms var(--ease-spring); }
+
+#hl, #src, #findHL {
+  margin: 0; padding: 0; border: 0; background: transparent;
+  font-family: var(--mono); font-size: calc(13.5px * var(--usize)); line-height: 1.78;
+  letter-spacing: 0; tab-size: 4;
+  white-space: pre-wrap; word-wrap: break-word; overflow-wrap: break-word;
+}
+#hl, #findHL {
+  position: absolute; top: calc(34px + var(--titlebar-h)); left: 34px; right: 34px;
+  pointer-events: none; color: var(--ink-soft); z-index: 0;
+  transition: top 320ms var(--ease-spring);
+}
+/* the find layer sits under #hl and paints nothing but the match boxes —
+   #hl draws the real, tinted text directly on top of them */
+#findHL { color: transparent; -webkit-text-fill-color: transparent; z-index: 0; }
+#src {
+  position: relative; display: block; width: 100%; min-height: 60vh;
+  resize: none; outline: none; color: transparent;
+  caret-color: var(--accent); z-index: 1; -webkit-text-fill-color: transparent;
+}
+#src::selection { background: var(--accent-soft); }
+
+/* ---- find matches ---- */
+#findHL mark {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: transparent; -webkit-text-fill-color: transparent;
+  border-radius: 2px;
+}
+#findHL mark.cur {
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+#doc mark.fmark {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: inherit; border-radius: 2px; padding: 0 1px; margin: 0 -1px;
+}
+#doc mark.fmark.cur {
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+#hl .ln { transition: opacity 260ms var(--ease-soft); }
+body.focus #hl .ln { opacity: .22; }
+body.focus #hl .ln.cur { opacity: 1; }
+
+.t-head   { color: var(--syn-head); font-weight: 600; }
+.t-mark   { color: var(--syn-mark); }
+.t-bold   { color: var(--ink); font-weight: 650; }
+.t-em     { color: var(--ink); font-style: italic; }
+.t-code   { color: var(--syn-code); }
+.t-link   { color: var(--syn-link); }
+.t-quote  { color: var(--syn-quote); }
+.t-fence  { color: var(--syn-code); opacity: .85; }
+.t-hr     { color: var(--syn-mark); }
+.t-strike { color: var(--muted); text-decoration: line-through; }
+.t-fm     { color: var(--muted); }
+
+/* ============================================================
+   rendered document
+   ============================================================ */
+#doc {
+  max-width: var(--measure); margin: 0 auto;
+  padding: calc(40px + var(--titlebar-h)) 40px 45vh 40px;
+  font-family: var(--prose); font-size: calc(16.5px * var(--fscale) * var(--usize)); line-height: 1.72;
+  letter-spacing: -.011em; color: var(--ink);
+  transition: max-width var(--dur) var(--ease-spring), padding var(--dur) var(--ease-spring),
+              font-size var(--dur) var(--ease-spring);
+}
+body[data-mode="split"] #doc { max-width: 38rem; padding: calc(34px + var(--titlebar-h)) 38px 45vh 38px; font-size: calc(15.5px * var(--fscale) * var(--usize)); }
+
+#doc > .blk { position: relative; transition: opacity 260ms var(--ease-soft); }
+body.focus #doc > .blk { opacity: .26; }
+body.focus #doc > .blk.cur { opacity: 1; }
+
+#doc h1,#doc h2,#doc h3,#doc h4,#doc h5,#doc h6 {
+  font-weight: 680; letter-spacing: -.021em; line-height: 1.25;
+  color: var(--ink); margin: 1.9em 0 .55em;
+}
+#doc h1 { font-size: 1.92em; letter-spacing: -.028em; margin-top: .15em; }
+#doc h2 { font-size: 1.44em; }
+#doc h3 { font-size: 1.19em; }
+#doc h4 { font-size: 1.02em; }
+#doc h5,#doc h6 { font-size: .93em; color: var(--ink-soft); text-transform: uppercase; letter-spacing: .06em; }
+#doc .blk:first-child h1, #doc .blk:first-child h2 { margin-top: .1em; }
+
+#doc p { margin: 0 0 1.05em; }
+#doc a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-soft); transition: border-color 160ms; }
+#doc a:hover { border-bottom-color: var(--accent); }
+#doc strong { font-weight: 650; }
+#doc em { font-style: italic; }
+#doc del { color: var(--muted); }
+
+#doc ul,#doc ol { margin: 0 0 1.05em; padding-left: 1.45em; }
+#doc li { margin: .24em 0; }
+#doc li::marker { color: var(--faint); }
+#doc li > ul,#doc li > ol { margin: .24em 0 .1em; }
+#doc input[type="checkbox"] { accent-color: var(--accent); margin-right: .45em; transform: translateY(1px); }
+#doc li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.3em; }
+
+#doc blockquote {
+  margin: 0 0 1.05em; padding: .1em 0 .1em 1.1em;
+  border-left: 2px solid var(--rule-strong); color: var(--ink-soft);
+}
+#doc blockquote p:last-child { margin-bottom: 0; }
+
+#doc code {
+  font-family: var(--mono); font-size: .855em; background: var(--code-bg);
+  padding: .14em .36em; border-radius: 4px; color: var(--ink);
+}
+#doc pre {
+  margin: 0 0 1.15em; padding: 14px 16px; background: var(--code-bg);
+  border-radius: 9px; overflow-x: auto; border: 1px solid var(--rule);
+}
+#doc pre code { background: none; padding: 0; font-size: .83em; line-height: 1.62; display: block; }
+
+#doc hr { border: 0; height: 1px; background: var(--rule-strong); margin: 2.2em 0; }
+
+#doc table { width: 100%; border-collapse: collapse; margin: 0 0 1.15em; font-size: .93em; }
+#doc th,#doc td { text-align: left; padding: .5em .75em; border-bottom: 1px solid var(--rule); }
+#doc th { font-weight: 620; color: var(--ink-soft); border-bottom-color: var(--rule-strong); }
+#doc tr:last-child td { border-bottom: 0; }
+
+#doc img { max-width: 100%; border-radius: 8px; display: block; margin: 0 0 1.15em; }
+
+/* front matter card */
+.fm-card {
+  margin: 0 0 1.4em; padding: 12px 14px;
+  background: var(--code-bg); border: 1px solid var(--rule); border-radius: 10px;
+  display: grid; grid-template-columns: auto 1fr; gap: 4px 14px;
+  font-size: .8em; line-height: 1.5;
+}
+.fm-card dt { color: var(--muted); font-weight: 550; letter-spacing: .01em; }
+.fm-card dd { margin: 0; color: var(--ink-soft); }
+
+/* footnotes */
+.fn-ref { font-size: .72em; vertical-align: super; line-height: 0;
+          color: var(--accent); text-decoration: none; padding: 0 .1em; }
+.fn-def { display: flex; gap: .6em; font-size: .87em; color: var(--ink-soft);
+          padding: .3em 0; border-top: 1px solid var(--rule); margin: 0 0 .3em; }
+.fn-def .fn-id { color: var(--accent); font-weight: 600; flex: 0 0 auto; }
+.fn-def p { margin: 0; }
+
+/* code highlighting */
+.hljs-keyword,.hljs-selector-tag,.hljs-literal,.hljs-section { color: var(--hl-key); }
+.hljs-string,.hljs-regexp,.hljs-addition,.hljs-attribute,.hljs-meta .hljs-string { color: var(--hl-str); }
+.hljs-number,.hljs-symbol,.hljs-bullet,.hljs-quote { color: var(--hl-num); }
+.hljs-comment,.hljs-meta { color: var(--hl-com); font-style: italic; }
+.hljs-title,.hljs-name,.hljs-selector-id,.hljs-selector-class,.hljs-built_in { color: var(--hl-fn); }
+.hljs-type,.hljs-class .hljs-title,.hljs-attr,.hljs-variable,.hljs-template-variable { color: var(--hl-type); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 650; }
+.hljs-deletion { color: var(--syn-head); }
+
+/* katex */
+.katex { font-size: 1.02em; }
+.katex-display { margin: 0 0 1.15em; overflow-x: auto; overflow-y: hidden; padding: .2em 0; }
+.math-error { color: var(--syn-head); font-family: var(--mono); font-size: .85em; }
+
+/* live editing */
+body[data-mode="live"] #doc .blk {
+  border-radius: 7px; margin: 0 -12px; padding: 0 12px; cursor: text;
+  transition: background-color 200ms var(--ease-soft), opacity 260ms var(--ease-soft);
+}
+body[data-mode="live"] #doc .blk:hover { background: var(--hover); }
+body[data-mode="live"] #doc .blk.editing,
+body[data-mode="live"] #doc .blk.editing:hover { background: transparent; }
+
+.blk-edit {
+  display: block; width: 100%; margin: .1em 0 1.05em;
+  border: 0; outline: none; resize: none;
+  background: var(--code-bg); border-radius: 7px; padding: 10px 12px;
+  font-family: var(--mono); font-size: 13.4px; line-height: 1.72;
+  color: var(--ink-soft); caret-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--rule); overflow: hidden;
+  animation: blkIn 240ms var(--ease-spring) both;
+}
+@keyframes blkIn { from { opacity: 0; transform: translateY(-3px) scale(.995); } to { opacity: 1; transform: none; } }
+
+/* transition sweep */
+#sweep {
+  position: absolute; inset: 0; pointer-events: none; opacity: 0; z-index: 5;
+  background: linear-gradient(100deg, transparent 0%, transparent 34%,
+    color-mix(in srgb, var(--accent) 14%, transparent) 50%, transparent 66%, transparent 100%);
+  background-size: 260% 100%;
+}
+#sweep.run { animation: sweep 760ms var(--ease-soft) both; }
+@keyframes sweep {
+  0%   { opacity: 0; background-position: 130% 0; }
+  16%  { opacity: 1; }
+  82%  { opacity: 1; }
+  100% { opacity: 0; background-position: -60% 0; }
+}
+
+/* ============================================================
+   heading scrubber (right edge, hover to reveal)
+   ============================================================ */
+#scrub {
+  position: fixed; right: 0; top: var(--fade-h); bottom: var(--status-h);
+  width: 30px; z-index: 55;
+  opacity: 0; pointer-events: none;
+  transition: opacity 260ms var(--ease-soft);
+  -webkit-user-select: none; user-select: none;
+}
+#scrub.has { pointer-events: auto; }
+#scrub.has:hover, body.scrubbing #scrub { opacity: 1; }
+#scrub .tick {
+  position: absolute; right: 8px;
+  height: 2px; border-radius: 2px; background: var(--faint);
+  cursor: pointer;
+  transition: background-color 160ms, width 220ms var(--ease-spring), opacity 160ms;
+}
+#scrub .tick[data-l="1"] { width: 18px; }
+#scrub .tick[data-l="2"] { width: 13px; }
+#scrub .tick[data-l="3"] { width: 9px; }
+#scrub .tick[data-l="4"], #scrub .tick[data-l="5"], #scrub .tick[data-l="6"] { width: 6px; }
+#scrub .tick:hover, #scrub .tick.cur { background: var(--accent); }
+#scrub .tick:hover { width: 22px; }
+#scrubLabel {
+  position: fixed; right: 34px; z-index: 56;
+  background: var(--surface); color: var(--ink);
+  border: 1px solid var(--rule); box-shadow: var(--shadow-lg);
+  border-radius: 7px; padding: 4px 9px; font-size: 11.5px; white-space: nowrap;
+  opacity: 0; pointer-events: none; transform: translateY(-50%) translateX(6px);
+  transition: opacity 160ms var(--ease-soft), transform 240ms var(--ease-spring);
+}
+#scrubLabel.show { opacity: 1; transform: translateY(-50%) translateX(0); }
+
+/* ============================================================
+   status bar
+   ============================================================ */
+#status {
+  position: fixed; inset: auto 0 0 0; height: var(--status-h);
+  display: grid; grid-template-columns: 1fr auto 1fr; align-items: center;
+  gap: 8px; padding: 0 7px;
+  font-size: 11px; font-variant-numeric: tabular-nums; letter-spacing: .005em;
+  color: var(--faint); background: var(--chrome);
+  -webkit-backdrop-filter: saturate(180%) blur(24px);
+  backdrop-filter: saturate(180%) blur(24px);
+  border-top: 1px solid var(--rule);
+  -webkit-user-select: none; user-select: none; z-index: 60;
+  transition: opacity 260ms var(--ease-soft), transform 320ms var(--ease-spring);
+}
+.st-left   { display: flex; align-items: center; gap: 3px; min-width: 0; }
+.st-center { display: flex; align-items: center; justify-content: center; min-width: 0; }
+.st-right  { display: flex; align-items: center; gap: 2px; justify-content: flex-end; min-width: 0; }
+.st-right .st { white-space: nowrap; }
+#status b { font-weight: 550; color: var(--muted); }
+#status .st {
+  padding: 2px 6px; border-radius: 5px;
+  transition: background-color 150ms, color 150ms;
+}
+#status .st.click { cursor: pointer; }
+#status .st.click:hover { background: var(--hover); color: var(--muted); }
+#status .st.click:hover b { color: var(--ink-soft); }
+#status .saved { color: var(--faint); }
+
+/* ============================================================
+   zen mode
+   ============================================================ */
+body.zen #stage { top: 0; bottom: 0; }
+body.zen #scrub { top: 0; bottom: 0; }
+/* Zen takes the bar away entirely. While it is gone it must not keep
+   swallowing clicks, or there would be a dead patch of paper where it used
+   to be — hence pointer-events, not just opacity. It comes back when the
+   pointer approaches the top or the page is scrolled up. */
+body.zen #titlebar { opacity: 0; pointer-events: none; }
+body.zen.rt #titlebar { opacity: 1; pointer-events: auto; }
+body.zen #status { opacity: 0; transform: translateY(8px); pointer-events: none; }
+body.zen.rb #status { opacity: 1; transform: none; pointer-events: auto; }
+body.zen .editor-inner { padding-top: 62px; }
+body.zen #hl, body.zen #findHL { top: 62px; }
+body.zen #doc { padding-top: 62px; }
+
+/* ============================================================
+   find bar
+   ============================================================ */
+#find {
+  position: fixed; top: calc(var(--fade-h) + 6px); right: 14px; z-index: 78;
+  display: flex; align-items: center; gap: 6px;
+  background: var(--surface); border: 1px solid var(--rule);
+  box-shadow: var(--shadow-lg); border-radius: 10px; padding: 6px 8px;
+  opacity: 0; visibility: hidden; transform: translateY(-8px) scale(.97);
+  transition: opacity 180ms var(--ease-soft), transform 300ms var(--ease-spring), visibility 0s linear 300ms;
+}
+#find.open { opacity: 1; visibility: visible; transform: none; transition-delay: 0s; }
+body.zen #find { top: calc(var(--fade-h) + 6px); }
+#find input {
+  appearance: none; border: 0; outline: none; background: var(--hover);
+  border-radius: 6px; padding: 5px 8px; height: 26px;
+  font-family: var(--ui); font-size: 12px; color: var(--ink); width: 168px;
+}
+#find input::placeholder { color: var(--faint); }
+#find .fcount { font-size: 11px; color: var(--faint); min-width: 54px; text-align: center;
+                font-variant-numeric: tabular-nums; }
+#find button {
+  appearance: none; border: 0; background: none; cursor: pointer;
+  color: var(--muted); border-radius: 6px; height: 26px; padding: 0 8px;
+  font-family: var(--ui); font-size: 11.5px; font-weight: 550;
+  display: grid; place-items: center;
+  transition: background-color 150ms, color 150ms;
+}
+#find button:hover { background: var(--hover); color: var(--ink); }
+#find button svg { width: 13px; height: 13px; }
+#find .div { width: 1px; height: 18px; background: var(--rule); margin: 0 2px; }
+
+/* ============================================================
+   picker overlay (command palette / headings)
+   ============================================================ */
+#pickerWrap {
+  position: fixed; inset: 0; z-index: 95;
+  background: color-mix(in srgb, var(--paper) 42%, transparent);
+  -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding-top: 14vh;
+  opacity: 0; visibility: hidden;
+  transition: opacity 160ms var(--ease-soft), visibility 0s linear 180ms;
+}
+#pickerWrap.open { opacity: 1; visibility: visible; transition-delay: 0s; }
+#picker {
+  width: min(600px, calc(100vw - 48px));
+  background: var(--surface); border: 1px solid var(--rule);
+  border-radius: 14px; box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  transform: translateY(-10px) scale(.97);
+  transition: transform 340ms var(--ease-spring);
+}
+#pickerWrap.open #picker { transform: none; }
+#pickerInput {
+  appearance: none; border: 0; outline: none; background: none;
+  width: 100%; padding: 14px 16px; font-family: var(--ui);
+  font-size: 15px; color: var(--ink); letter-spacing: -.008em;
+  border-bottom: 1px solid var(--rule);
+}
+#pickerInput::placeholder { color: var(--faint); }
+#pickerList { max-height: min(46vh, 420px); overflow-y: auto; padding: 6px; }
+.pk {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; border-radius: 8px; cursor: pointer;
+  font-size: 13px; color: var(--ink-soft);
+}
+.pk .pk-t { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pk .pk-k { font-size: 11px; color: var(--faint); letter-spacing: .02em; flex: 0 0 auto; }
+.pk .pk-h { color: var(--faint); font-size: 11px; flex: 0 0 auto; width: 20px; }
+.pk .pk-hint { font-size: 11px; color: var(--faint); flex: 0 0 auto; white-space: nowrap; }
+.pk.sel { background: var(--accent-soft); color: var(--ink); }
+.pk.sel .pk-k { color: var(--accent); }
+.pk.sel .pk-hint { color: var(--muted); }
+.pk-empty { padding: 18px; text-align: center; color: var(--faint); font-size: 12.5px; }
+
+/* ============================================================
+   version history browser
+
+   Same overlay grammar as the command palette — dimmed paper, blurred
+   backdrop, a panel that settles in on the spring — but two columns and
+   taller, because this one is read rather than typed at. Every colour comes
+   from the theme's own variables, so it follows Paper through to Void
+   without a per-theme rule anywhere below.
+   ============================================================ */
+#histWrap {
+  position: fixed; inset: 0; z-index: 96;
+  background: color-mix(in srgb, var(--paper) 42%, transparent);
+  -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);
+  display: flex; align-items: center; justify-content: center;
+  padding: 6vh 24px;
+  opacity: 0; visibility: hidden;
+  transition: opacity 160ms var(--ease-soft), visibility 0s linear 180ms;
+}
+#histWrap.open { opacity: 1; visibility: visible; transition-delay: 0s; }
+#histPanel {
+  width: min(940px, 100%); height: min(620px, 100%);
+  display: flex; flex-direction: column;
+  background: var(--surface); border: 1px solid var(--rule);
+  border-radius: 14px; box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  transform: translateY(-10px) scale(.97);
+  transition: transform 340ms var(--ease-spring);
+}
+#histWrap.open #histPanel { transform: none; }
+
+.hist-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 13px 14px 13px 16px;
+  border-bottom: 1px solid var(--rule); flex: 0 0 auto;
+}
+.hist-head h3 {
+  margin: 0; font-family: var(--ui); font-size: 14px;
+  font-weight: 600; color: var(--ink); letter-spacing: -.008em;
+}
+.hist-meta { flex: 1 1 auto; font-size: 11.5px; color: var(--faint); }
+.hist-x {
+  flex: 0 0 auto; display: grid; place-items: center;
+  width: 26px; height: 26px; padding: 0;
+  appearance: none; background: none; border: 0; border-radius: 7px;
+  color: var(--faint); cursor: pointer;
+}
+.hist-x svg { width: 13px; height: 13px; }
+.hist-x:hover { background: var(--accent-soft); color: var(--ink); }
+
+.hist-body { flex: 1 1 auto; display: flex; min-height: 0; }
+
+.hist-col {
+  flex: 0 0 236px; display: flex; flex-direction: column; min-height: 0;
+  border-right: 1px solid var(--rule);
+}
+#histFilter {
+  flex: 0 0 auto; appearance: none; border: 0; outline: none; background: none;
+  width: 100%; padding: 10px 12px; font-family: var(--ui);
+  font-size: 12.5px; color: var(--ink); letter-spacing: -.006em;
+  border-bottom: 1px solid var(--rule);
+}
+#histFilter::placeholder { color: var(--faint); }
+#histList { flex: 1 1 auto; overflow-y: auto; padding: 6px; outline: none; }
+.hs {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 7px 9px; border-radius: 8px; cursor: pointer;
+  font-size: 12.5px; color: var(--ink-soft);
+}
+.hs .hs-t { flex: 1 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hs .hs-d { flex: 0 0 auto; font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.hs.sel { background: var(--accent-soft); color: var(--ink); }
+.hs.sel .hs-d { color: var(--accent); }
+.hs.now .hs-t { font-style: italic; }
+.hs-empty { padding: 18px; text-align: center; color: var(--faint); font-size: 12.5px; }
+
+#histSide { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; }
+.hist-side-head {
+  flex: 0 0 auto; padding: 10px 16px;
+  border-bottom: 1px solid var(--rule);
+  font-size: 11.5px; color: var(--muted);
+}
+#histPreview {
+  flex: 1 1 auto; margin: 0; padding: 14px 16px; overflow: auto;
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.62;
+  color: var(--ink-soft); white-space: pre-wrap; word-break: break-word;
+  -webkit-user-select: text; user-select: text;
+}
+/* The lines that differ from the document as it stands. Everything outside
+   this range is identical, so it is dimmed rather than hidden — the point is
+   to see the change in its context. */
+#histPreview .hd-same { color: var(--faint); }
+#histPreview .hd-diff {
+  display: block;
+  color: var(--ink);
+  background: var(--accent-soft);
+  /* The left rule, not the wash, is what carries this: --accent-soft goes
+     fully transparent under the high-contrast block near the end of this
+     file, and the changed region still has to be findable there. */
+  border-left: 2px solid var(--accent);
+  margin: 2px 0 2px -16px;
+  padding: 2px 0 2px 14px;
+}
+#histPreview .hd-gap {
+  display: block; color: var(--faint); font-style: italic;
+  padding: 5px 0; opacity: .75;
+}
+
+.hist-foot {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+  padding: 11px 14px; border-top: 1px solid var(--rule);
+}
+.hist-hint { flex: 1 1 auto; font-size: 11.5px; color: var(--faint); }
+.hist-btn {
+  appearance: none; cursor: pointer;
+  font-family: var(--ui); font-size: 12.5px; color: var(--ink-soft);
+  padding: 6px 13px; border-radius: 8px;
+  border: 1px solid var(--rule); background: none;
+  min-height: 30px;
+}
+.hist-btn:hover:not(:disabled) { background: var(--accent-soft); color: var(--ink); }
+/* --paper is the contrast partner for --accent in every theme: the light
+   themes pair a dark accent with light paper, the dark themes the reverse. */
+.hist-btn.primary { border-color: transparent; background: var(--accent); color: var(--paper); }
+.hist-btn.primary:hover:not(:disabled) { filter: brightness(1.06); }
+.hist-btn:disabled { opacity: .38; cursor: default; }
+
+/* ============================================================
+   theme popover
+   ============================================================ */
+#themePop {
+  position: fixed; bottom: calc(var(--status-h) + 8px); left: 10px; z-index: 82;
+  width: 240px; background: var(--surface);
+  border: 1px solid var(--rule); border-radius: 13px;
+  box-shadow: var(--shadow-lg); padding: 10px;
+  max-height: calc(100vh - var(--status-h) - var(--fade-h) - 16px); overflow-y: auto;
+  opacity: 0; visibility: hidden; transform: translateY(8px) scale(.96);
+  transform-origin: bottom left;
+  transition: opacity 180ms var(--ease-soft), transform 320ms var(--ease-spring), visibility 0s linear 320ms;
+  -webkit-user-select: none; user-select: none;
+}
+#themePop.open { opacity: 1; visibility: visible; transform: none; transition-delay: 0s; }
+body.zen #themePop, body.zen #help { bottom: 14px; }
+
+.tp-row {
+  display: flex; align-items: center; gap: 9px;
+  padding: 7px 8px; border-radius: 8px; cursor: pointer;
+  font-size: 12.5px; color: var(--ink-soft);
+  transition: background-color 140ms;
+}
+.tp-row:hover { background: var(--hover); }
+.tp-row.on { color: var(--ink); font-weight: 550; }
+.tp-row .sw {
+  width: 26px; height: 18px; border-radius: 5px; flex: 0 0 auto;
+  border: 1px solid var(--rule-strong); position: relative; overflow: hidden;
+}
+.tp-row .sw i { position: absolute; right: 3px; top: 4px; width: 9px; height: 2px; border-radius: 2px; }
+.tp-row .sw u { position: absolute; right: 3px; top: 9px; width: 6px; height: 2px; border-radius: 2px; }
+.tp-row .tick { margin-left: auto; color: var(--accent); opacity: 0; font-size: 12px; }
+.tp-row.on .tick { opacity: 1; }
+.tp-sep { height: 1px; background: var(--rule); margin: 7px 4px; }
+.tp-head { font-size: 9.5px; font-weight: 640; text-transform: uppercase;
+           letter-spacing: .09em; color: var(--faint); padding: 4px 8px 3px; }
+.tp-row .fname { font-size: 14px; line-height: 1; width: 26px; text-align: center; flex: 0 0 auto; color: var(--ink-soft); }
+.tp-row.on .fname { color: var(--accent); }
+
+/* text size stepper */
+.tp-size { display: flex; align-items: center; gap: 6px; padding: 3px 8px 5px; }
+.tp-size button {
+  display: grid; place-items: center; width: 30px; height: 30px; flex: 0 0 auto;
+  border: 1px solid var(--rule); border-radius: 8px; background: transparent;
+  color: var(--ink-soft); cursor: pointer; font-size: 14px; line-height: 1;
+  transition: background-color 140ms, color 140ms, border-color 140ms;
+}
+.tp-size button:hover:not(:disabled) { background: var(--hover); color: var(--ink); border-color: var(--rule-strong); }
+.tp-size button:disabled { opacity: .35; cursor: default; }
+.tp-size .tp-steps { display: flex; align-items: center; gap: 4px; flex: 1 1 auto; justify-content: center; }
+.tp-size .tp-step {
+  width: 100%; height: 4px; border-radius: 2px; background: var(--rule-strong);
+  transition: background-color 160ms;
+}
+.tp-size .tp-step.on { background: var(--accent); }
+.tp-size .tp-val {
+  min-width: 40px; text-align: right; font-size: 11px; color: var(--faint);
+  font-variant-numeric: tabular-nums; flex: 0 0 auto;
+}
+
+/* ============================================================
+   selection formatting bubble
+   ============================================================ */
+#bubble {
+  position: fixed; z-index: 95; display: flex; align-items: center; gap: 2px;
+  padding: 4px; border-radius: 11px;
+  background: var(--surface); border: 1px solid var(--rule);
+  box-shadow: var(--shadow-lg);
+  opacity: 0; visibility: hidden; transform: translateY(4px) scale(.94);
+  transform-origin: center bottom; pointer-events: none;
+  transition: opacity 130ms var(--ease-soft), transform 260ms var(--ease-spring),
+              visibility 0s linear 260ms;
+  -webkit-user-select: none; user-select: none;
+}
+#bubble.open { opacity: 1; visibility: visible; transform: none; pointer-events: auto; transition-delay: 0s; }
+#bubble.below { transform-origin: center top; }
+
+.bb {
+  display: grid; place-items: center; min-width: 30px; height: 30px; padding: 0 7px;
+  border: 0; border-radius: 8px; background: transparent; cursor: pointer;
+  color: var(--ink-soft); font-family: var(--ui); font-size: 12.5px; line-height: 1;
+  transition: background-color 130ms, color 130ms;
+}
+.bb:hover { background: var(--hover); color: var(--ink); }
+.bb:active { background: var(--accent-soft); }
+.bb svg { width: 15px; height: 15px; display: block; }
+.bb.bb-more svg { width: 13px; height: 13px; transition: transform 240ms var(--ease-spring); }
+#bubble.expanded .bb-more svg { transform: rotate(180deg); }
+.bb-sep { width: 1px; height: 17px; background: var(--rule); margin: 0 3px; flex: 0 0 auto; }
+.bb-rest { display: none; align-items: center; gap: 2px; }
+#bubble.expanded .bb-rest { display: flex; }
+
+/* ============================================================
+   help panel — wide, no scrolling
+   ============================================================ */
+#help {
+  position: fixed; bottom: calc(var(--status-h) + 8px); right: 10px; left: 12px;
+  max-width: 1180px; margin-left: auto;
+  background: var(--surface); border-radius: 15px; border: 1px solid var(--rule);
+  box-shadow: var(--shadow-lg); padding: 15px 18px 16px; z-index: 80;
+  opacity: 0; transform: translateY(8px) scale(.965); transform-origin: bottom right;
+  pointer-events: none; visibility: hidden;
+  transition: opacity 200ms var(--ease-soft), transform 320ms var(--ease-spring), visibility 0s linear 340ms;
+  -webkit-user-select: none; user-select: none;
+}
+#help.open {
+  opacity: 1; transform: none; pointer-events: auto; visibility: visible;
+  transition: opacity 200ms var(--ease-soft), transform 380ms var(--ease-spring), visibility 0s;
+}
+
+.help-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+.help-head h3 { margin: 0; font-size: 12.5px; font-weight: 620; letter-spacing: -.005em; color: var(--ink); }
+
+#helpBody { columns: 3; column-gap: 26px; column-rule: 1px solid var(--rule); }
+@media (max-width: 900px) { #helpBody { columns: 2; } }
+
+.help-sec {
+  font-size: 9.5px; font-weight: 640; text-transform: uppercase; letter-spacing: .09em;
+  color: var(--faint); margin: 12px 0 5px; break-after: avoid;
+}
+.help-sec.first { margin-top: 0; }
+.help-grp { break-inside: avoid; }
+
+.help-row {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 10px; align-items: center;
+  padding: 4px 7px; margin: 0 -7px; border-radius: 6px;
+  break-inside: avoid;
+  transition: background-color 140ms;
+}
+.help-row:hover { background: var(--hover); }
+.help-row .syn { font-family: var(--mono); font-size: 10.5px; color: var(--ink-soft);
+                 white-space: pre-wrap; line-height: 1.45; }
+.help-row .out { font-family: var(--prose); font-size: 12px; color: var(--ink);
+                 line-height: 1.4; overflow: hidden; }
+.help-row .out h1,.help-row .out h2,.help-row .out h3 { margin: 0; font-weight: 680; letter-spacing: -.02em; }
+.help-row .out h1 { font-size: 15px; } .help-row .out h2 { font-size: 13.5px; } .help-row .out h3 { font-size: 12px; }
+.help-row .out p { margin: 0; }
+.help-row .out code { font-family: var(--mono); font-size: 10.5px; background: var(--code-bg);
+                      padding: .1em .3em; border-radius: 3px; }
+.help-row .out pre { margin: 0; padding: 4px 7px; background: var(--code-bg); border-radius: 5px; font-size: 10px; }
+.help-row .out pre code { background: none; padding: 0; }
+.help-row .out a { color: var(--accent); text-decoration: none; }
+.help-row .out ul { margin: 0; padding-left: 1.15em; }
+.help-row .out ol { margin: 0; padding-left: 1.5em; }
+.help-row .out li { margin: 0; }
+.help-row .out li::marker { color: var(--faint); }
+.help-row .out li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.15em; }
+.help-row .out input[type="checkbox"] { accent-color: var(--accent); margin-right: .3em; }
+.help-row .out blockquote { margin: 0; padding-left: 8px; border-left: 2px solid var(--rule-strong); color: var(--ink-soft); }
+.help-row .out hr { border: 0; height: 1px; background: var(--rule-strong); margin: 5px 0; }
+.help-row .out table { border-collapse: collapse; font-size: 10.5px; width: 100%; }
+.help-row .out th,.help-row .out td { border: 1px solid var(--rule); padding: 1px 4px; text-align: left; }
+
+/* Proximity has to do the grouping here, because nothing else does: there is
+   no rule between the columns and no alignment tying a key to its own label.
+   So the gap inside a pair must be clearly smaller than the gap between two
+   pairs. space-between did the exact opposite — it pushed each key to the far
+   right of its cell, which left it sitting a few pixels from the *next*
+   item's label and half a column away from its own, so ⌘P read as the
+   shortcut for Find rather than for Print. The keys no longer line up in a
+   column, which is the price of packing them against their labels, and the
+   right trade: a legend is read pair by pair, not scanned down the keys. */
+.help-foot {
+  margin-top: 13px; padding-top: 10px; border-top: 1px solid var(--rule);
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px 30px;
+  font-size: 10.5px; color: var(--muted);
+}
+@media (max-width: 900px) { .help-foot { grid-template-columns: repeat(3, 1fr); } }
+.help-foot span {
+  display: flex; align-items: center; gap: 6px;
+  justify-content: flex-start;
+}
+/* The label is a bare text node, so it is an anonymous flex item and cannot
+   be selected. It wraps rather than overflows if a cell is tight, which is
+   what it did before. The key is pinned so it is never what gives way. */
+.help-foot kbd { flex: 0 0 auto; }
+.help-foot kbd {
+  font-family: var(--ui); font-size: 10px; color: var(--ink-soft);
+  background: var(--hover); border-radius: 4px; padding: 1px 5px; border: .5px solid var(--rule);
+}
+
+/* ============================================================
+   misc
+   ============================================================ */
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: transparent; border-radius: 8px; border: 3px solid transparent; background-clip: content-box; }
+*:hover::-webkit-scrollbar-thumb { background: var(--rule-strong); background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--faint); background-clip: content-box; }
+
+#toast {
+  position: fixed; bottom: calc(var(--status-h) + 16px); left: 50%;
+  transform: translate(-50%, 10px) scale(.96);
+  background: var(--surface); color: var(--ink);
+  border: 1px solid var(--rule); box-shadow: var(--shadow-lg);
+  border-radius: 10px; padding: 7px 14px; font-size: 12px; letter-spacing: -.004em;
+  opacity: 0; pointer-events: none; z-index: 90;
+  transition: opacity 200ms var(--ease-soft), transform 340ms var(--ease-spring);
+}
+#toast.show { opacity: 1; transform: translate(-50%, 0) scale(1); }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+
+/* ============================================================
+   print / export as PDF
+   ------------------------------------------------------------
+   Printing goes through the live web view rather than a second
+   rendering of the document, so whatever is on screen — maths,
+   highlighted code, resolved image paths — is what lands on the
+   page. Everything below strips the app back to #doc and puts
+   it on white, regardless of the theme in use; Void on paper
+   would be a cartridge of ink for four pages of text.
+   ============================================================ */
+@media print {
+  /* the six themes all resolve to ink on paper once printed */
+  html, html[data-theme] {
+    --paper:#fff; --surface:#fff; --chrome:#fff;
+    --ink:#000; --ink-soft:#1a1a1a; --muted:#4a4a4a; --faint:#767676;
+    --rule:rgba(0,0,0,.22); --rule-strong:rgba(0,0,0,.4); --hover:transparent;
+    --accent:#000; --accent-soft:transparent;
+    --code-bg:#f2f2f2; --mark:#b8860b;
+    --shadow-lg:none; --shadow-sm:none;
+    --syn-head:#000; --syn-mark:#666; --syn-link:#000; --syn-code:#1a4d38; --syn-quote:#4a4a4a;
+    --hl-key:#7a2b4f; --hl-str:#1f5c42; --hl-num:#73431b; --hl-com:#6a6a6a;
+    --hl-fn:#243f8f; --hl-type:#553d78;
+  }
+
+  /* app chrome has no business on paper */
+  #titlebar, #status, #scrub, #scrubLabel, #find, #findHL, #pickerWrap,
+  #themePop, #bubble, #help, #toast, #divider, #sweep, #sourcePane {
+    display: none !important;
+  }
+
+  html, body {
+    height: auto !important; overflow: visible !important;
+    background: #fff !important; color: #000 !important;
+  }
+  body { transition: none !important; }
+
+  /* unpick the fixed, flexed, scrolling shell so the page can flow */
+  #stage {
+    position: static !important; display: block !important;
+    top: auto !important; bottom: auto !important; overflow: visible !important;
+  }
+  #previewPane {
+    position: static !important; flex: none !important;
+    overflow: visible !important; opacity: 1 !important;
+    transform: none !important; filter: none !important;
+  }
+  #doc {
+    max-width: none !important; width: auto !important;
+    margin: 0 !important; padding: 0 !important;
+    font-size: 11pt; line-height: 1.5; color: #000 !important;
+  }
+  #doc > .blk {
+    margin: 0 !important; padding: 0 !important;
+    background: none !important; opacity: 1 !important;
+  }
+  /* focus mode dims everything but the current block — not on paper */
+  body.focus #doc > .blk, #doc > .blk.cur { opacity: 1 !important; }
+  /* a block left open for editing prints as an empty box otherwise */
+  .blk-edit { display: none !important; }
+
+  /* keep blocks whole and headings attached to what they introduce */
+  #doc h1, #doc h2, #doc h3, #doc h4, #doc h5, #doc h6 {
+    break-after: avoid-page; page-break-after: avoid;
+    break-inside: avoid; page-break-inside: avoid;
+  }
+  #doc p, #doc li { orphans: 3; widows: 3; }
+  #doc pre, #doc blockquote, #doc table, #doc img,
+  #doc .fn-def, #doc .fm-card, #doc .katex-display {
+    break-inside: avoid; page-break-inside: avoid;
+  }
+  #doc img { max-width: 100% !important; height: auto !important; }
+  #doc pre { background: #f2f2f2 !important; border: 1px solid rgba(0,0,0,.15); }
+  #doc table { border-collapse: collapse; }
+  #doc thead { display: table-header-group; }
+
+  /* a printed link is useless without its address */
+  #doc a { color: #000 !important; text-decoration: underline; border: 0 !important; }
+  #doc a[href^="http"]::after,
+  #doc a[href^="mailto:"]::after {
+    content: " <" attr(href) ">";
+    font-size: .82em; color: #4a4a4a; word-break: break-all;
+  }
+
+  /* No @page margin rule: NSPrintInfo owns the margins, and Page Setup edits
+     them. Declaring them here as well would apply both and double the inset. */
+}

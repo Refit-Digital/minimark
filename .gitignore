@@ -1,0 +1,19 @@
+# Build output
+minimark.app/Contents/MacOS/minimark
+minimark.app/Contents/_CodeSignature/
+build/
+
+# Generated test artefacts
+test-history/mod.js
+
+# Dependencies
+node_modules/
+
+# Superseded by git
+backup-*/
+
+# macOS
+.DS_Store
+
+# Not part of the project
+yaar-digital-call-prep.md
