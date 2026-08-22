@@ -37,12 +37,14 @@
      second piece of chrome, it is the first one grown wide, which is why it
      borrows --bar-h rather than declaring a height of its own.
 
-     --tab-inset is what it leaves clear on the left for the window buttons:
-     --bar-pad, then the 52px the three of them come to, then --bar-pad again.
-     The bar's grip is hidden while the strip is open, so its 17px and the 14px
-     before it are not reserved — the grip moves to the far right of the strip,
-     onto the empty run that is the drag handle once tabs are showing. */
-  --tab-inset:  72px;   /* 10 + 52 + 10 */
+     --tab-inset is what it leaves clear on the left: the whole bar, not just
+     the window buttons. The bar does not change shape when the strip arrives —
+     it keeps its width and its grip, and the tabs begin on the far side of it.
+     Reserving only the buttons was tried and was wrong twice over: it took the
+     grip away, which is the one part of the bar that says "pick the window up
+     here", and it left the draggable surface on that side as nothing but the
+     two thin margins either side of three buttons. */
+  --tab-inset:  var(--bar-w);
   --tab-min:    96px;
   --tab-max:    186px;
   --tab-r:      9px;
@@ -335,15 +337,11 @@ body.tabs-open #tabbar { transform: translateY(0); pointer-events: auto; }
    request for it back — the same gesture that already un-hides the bar. */
 body.tabs-open #titlebar { opacity: 1; pointer-events: auto; }
 
-/* The bar stops being a free-standing object while the strip is out: no
-   radius where the slab continues, no fillets, and no grip, because the grip
-   moves to the empty run at the far end where the drag region now is. */
-body.tabs-open #titlebar { width: var(--tab-inset); }
+/* The bar stops being a free-standing object while the strip is out, but only
+   at its edges: no radius and no fillets where the slab now carries on past
+   it. Its width and its grip are untouched, because it is still the handle and
+   the tabs start on the other side of it. */
 body.tabs-open .tb-grip { border-radius: 0; }
-/* The hover rule below has to be beaten explicitly, or the dots come back
-   under the pointer on a bar that is no longer a handle in its own right. */
-body.tabs-open .tb-grip::after,
-body.tabs-open #titlebar:hover .tb-grip::after { opacity: 0; }
 body.tabs-open #titlebar::before,
 body.tabs-open #titlebar::after { display: none; }
 

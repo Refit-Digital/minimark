@@ -1891,7 +1891,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             rest?.isHidden = !tabsShowing || (restW?.constant ?? 0) < 1
             return                 // leave the buttons to AppKit while full screen
         }
-        edge?.isHidden = false
+
+        // The thin grabbable margin runs the whole width of the window, which
+        // is right when there is nothing up there but document, and wrong the
+        // moment the tab strip arrives: it would lie across the top 8px of
+        // every tab and the new-tab button, so a click near the top of a tab
+        // would pick the window up instead of selecting the document.
+        //
+        // While the strip is out it goes, and the two regions beside the tabs
+        // take over — the bar on the left, the empty run past the last tab on
+        // the right. Both are the full height of the strip, so there is more
+        // to grab than there was, not less, and none of it is over a tab.
+        // Hiding it cannot interrupt a drag already under way: AppKit's
+        // window-move loop belongs to the window once the mouse is down, not
+        // to the view the mouse went down on.
+        edge?.isHidden = tabsShowing
 
         // While zen has the bar hidden, its drag region has to go with it.
         // Otherwise there is an invisible dead patch sitting on the paper,

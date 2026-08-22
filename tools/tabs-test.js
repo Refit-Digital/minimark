@@ -191,8 +191,33 @@ const eq = (name, got, want) =>
     ok('peek: the empty run past the last tab is measured for the drag region',
        !!dragMsg && dragMsg.w > 0 && dragMsg.h > 0, JSON.stringify(dragMsg));
     const barMsg = msgs.filter(m => m.type === 'barX').pop();
-    ok('peek: the drag strip narrows to the space the buttons need',
-       !!barMsg && barMsg.w === 72, JSON.stringify(barMsg));
+    ok('peek: the bar keeps its full width, grip and all',
+       !!barMsg && barMsg.w === 103, JSON.stringify(barMsg));
+
+    /* The complaint this is here for: a tab that starts inside the bar puts a
+       window-drag region across the top of it, and a click near the top of the
+       tab picks the window up instead of selecting the document. */
+    const geom = await page.evaluate(() => {
+      /* The bar's settled position, not its animated one. It springs across on
+         a 420ms transition and getBoundingClientRect reports wherever it has
+         got to, which is a moving target rather than the geometry under test. */
+      const barNode = document.querySelector('#titlebar');
+      const barX = parseFloat(getComputedStyle(document.documentElement)
+                                .getPropertyValue('--bar-x')) || 0;
+      const bar = { right: barX + barNode.offsetWidth };
+      const tab = document.querySelector('#tabs .tab').getBoundingClientRect();
+      const add = document.querySelector('#tabAdd').getBoundingClientRect();
+      const rest = document.querySelector('#tabRest').getBoundingClientRect();
+      const grip = getComputedStyle(document.querySelector('.tb-grip'), '::after').opacity;
+      return { barRight: bar.right, tabLeft: tab.left, addRight: add.right,
+               restLeft: rest.left, gripOpacity: parseFloat(grip) };
+    });
+    ok('peek: the first tab starts clear of the bar, not inside it',
+       geom.tabLeft >= geom.barRight, JSON.stringify(geom));
+    ok('peek: the bar keeps its grip, so it still reads as the handle',
+       geom.gripOpacity > 0, JSON.stringify(geom));
+    ok('peek: the drag region past the tabs starts clear of the new-tab button',
+       geom.restLeft >= geom.addRight, JSON.stringify(geom));
   }
 
   await drain();
