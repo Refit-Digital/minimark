@@ -6,9 +6,12 @@
 //  it only talks to it over the `mm` bridge.
 //
 //  Build:
-//      swiftc -O -target arm64-apple-macos13.0 minimark.swift \
-//        -o minimark.app/Contents/MacOS/minimark
-//      codesign --force --deep --sign - minimark.app
+//      ./build.sh
+//
+//  That is the whole recipe. It compiles both architectures, lipos them, and
+//  ad-hoc signs the result — none of which is optional. An arm64-only binary
+//  will not launch on an Intel Mac at all, and an unsigned one will not launch
+//  anywhere on macOS 15.1 or later.
 //
 
 import AppKit

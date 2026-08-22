@@ -1,0 +1,14 @@
+{
+  "name": "minimark-tools",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Test and contract tools for minimark. Run `npm install --include=dev` here, then `npm test`.",
+  "scripts": {
+    "test": "node bridge-contract.js && node tabs-test.js",
+    "contract": "node bridge-contract.js",
+    "tabs": "node tabs-test.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1"
+  }
+}

@@ -208,19 +208,30 @@ For an open-source project this is the single highest-value phase. Right now the
 build instructions are a comment and the binary is not committed, so a fresh
 clone produces nothing runnable.
 
-- [ ] **`build.sh`.** Compile arm64 and x86_64 slices, `lipo` them together,
-      copy resources, ad-hoc sign, output to `build/minimark.app`. One command,
-      no Xcode project, no arguments. This replaces the comment at
-      `minimark.swift:8-11`. Keep `codesign --sign -` in it: without a signature
-      of some kind the app will not open at all on macOS 15.1 or later. Drop the
-      deprecated `--deep` and sign inside-out instead.
-- [ ] **Universal binary.** The current build is `-target arm64-apple-macos13.0`
-      only. Confirmed with `file`: it will not launch at all on an Intel Mac.
-      Add the x86_64 slice.
-- [ ] **App icon.** `minimark-build/icon/` is empty and no icon source exists
-      anywhere in the tree. Needs designing and an `.iconset` checked in so the
-      build script can generate the `.icns` rather than depending on a binary
-      blob nobody can regenerate.
+**Settled, 22 August:** the branch compiles. `swiftc -O` against both targets
+and `swiftc -typecheck` all come back clean, no errors and no warnings, which
+closes the "not compiled, tree-sitter catches syntax but not types" risk that
+had been open since the tabs work landed. `build.sh` and the universal binary
+below followed from that in an afternoon rather than the week this phase
+budgeted, because there was nothing wrong to find.
+
+- [x] **`build.sh`.** Done, 22 August. Both slices, `lipo`, resources, ad-hoc
+      sign, `build/minimark.app`. One command, no arguments. It also drops the
+      binary into the repo's own `minimark.app`, because that bundle reads the
+      real `Resources/` and is what you want to run while working on the web
+      layer. `--deep` is gone; there is no nested code, so one `codesign` call
+      per bundle already is inside-out. Two things learned doing it: `xattr -cr`
+      has to run first or codesign refuses the bundle over Finder metadata, and
+      the binary is `mv`d rather than `cp`d into place so a rebuild does not
+      overwrite the file a running instance is executing from.
+- [x] **Universal binary.** Done, same script. `file` reports
+      `Mach-O universal binary with 2 architectures`, `codesign --verify
+      --strict` passes.
+- [ ] **App icon.** `minimark-build/icon/` is still empty and there is no
+      `.iconset` in the tree, but note the roadmap was wrong to say no icon
+      exists at all: `minimark.app/Contents/Resources/AppIcon.icns` is there and
+      ships. What is missing is the *source* it was generated from, which is
+      what stops anyone else regenerating it.
 - [ ] **GitHub Actions CI.** A macOS runner that runs `build.sh` plus both test
       suites on every push. Cheap to set up, and it is what stops the
       dead-sandbox-path class of bug from ever recurring silently.

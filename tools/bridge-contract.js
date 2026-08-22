@@ -39,8 +39,6 @@ const resDir = findResources(process.argv[2]);
 const swiftFile = process.argv[3] || path.join(root, 'minimark.swift');
 
 const read = f => fs.readFileSync(f, 'utf8');
-const js = ['app.js', 'ui.js'].map(f => read(path.join(resDir, f))).join('\n');
-const swift = read(swiftFile);
 
 const uniq = a => Array.from(new Set(a)).sort();
 const all = (src, re, g = 1) => {
@@ -49,6 +47,20 @@ const all = (src, re, g = 1) => {
   while ((m = re.exec(src))) out.push(m[g]);
   return uniq(out);
 };
+
+/* Every script the page loads that is ours, taken from index.html rather than
+   listed here. The list was hardcoded as app.js and ui.js, which meant a new
+   file joining the web layer was silently outside the contract — the one
+   thing this tool exists to stop. vendor/ is excluded: nothing in there talks
+   over the bridge, and marked alone would double the size of the scan. */
+const ours = (() => {
+  const found = all(read(path.join(resDir, 'index.html')), /<script\s+src="([^"]+)"/g)
+    .filter(s => !s.startsWith('vendor/') && !/^https?:/.test(s));
+  if (!found.length) throw new Error('bridge-contract: no scripts found in index.html');
+  return found;
+})();
+const js = ours.map(f => read(path.join(resDir, f))).join('\n');
+const swift = read(swiftFile);
 
 /* ---- web to native ------------------------------------------------------
    send('type', {...}) in the page, against `case "type":` in the switch. */
