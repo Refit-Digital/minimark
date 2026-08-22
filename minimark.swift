@@ -585,6 +585,10 @@ final class DocTab {
     var mtime: Date?
     /// Only used while the document has no path of its own.
     var placeholder: String
+    /// What the file was decoded as, and therefore what it gets written back
+    /// as. A new document is UTF-8 because it has never been anything else.
+    var encoding: String.Encoding = .utf8
+    var encodingGuessed = false
 
     init(id: Int, url: URL?, placeholder: String = "Untitled.md") {
         self.id = id
@@ -1405,6 +1409,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         activeID = id
         syncWindowToTab()
         pushTabs()
+        pushEncoding()
         saveSession()
     }
 
@@ -1546,8 +1551,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             // A file that has become unreadable since it was noted is skipped
             // rather than reported: a launch is the wrong moment for a stack of
             // alerts about documents nobody has asked for yet.
-            guard let text = readText(url) else { continue }
+            guard let file = readTextFile(url) else { continue }
+            let text = file.text
             let tab = DocTab(id: nextTabID, url: url)
+            tab.encoding = file.encoding
+            tab.encodingGuessed = file.guessed
             nextTabID += 1
             restored.append(tab)
             texts.append((tab, text))
@@ -1590,11 +1598,89 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         saveSession()
     }
 
-    func readText(_ url: URL) -> String? {
-        if let s = try? String(contentsOf: url, encoding: .utf8) { return s }
+    // ------------------------------------------------------------------
+    // Reading and writing text
+    //
+    // This used to end with String(decoding:as:UTF8.self), which never fails:
+    // it substitutes U+FFFD for every byte it cannot make sense of. Open a
+    // Latin-1 file, type one character, and the autosave a second later wrote
+    // the replacement characters back over the original. There is no undo for
+    // that on disk, and nothing anywhere said it had happened.
+    //
+    // Two things fix it, and it needs both. Decoding stops guessing and says
+    // which encoding it used; writing then uses that same encoding rather than
+    // always UTF-8. Reading Latin-1 and writing UTF-8 is what destroyed the
+    // file — reading Latin-1 and writing Latin-1 round-trips every byte.
+    //
+    // Latin-1 is last and always succeeds, because every byte is a valid
+    // Latin-1 character. That is a feature here: it means a file is never
+    // refused for being in some 8-bit encoding we did not think of, and
+    // whatever it was, saving gives its bytes back unchanged. It is recorded
+    // as a guess rather than a fact, and the status bar says so.
+    // ------------------------------------------------------------------
+
+    struct TextFile {
+        let text: String
+        let encoding: String.Encoding
+        /// True when nothing identified the encoding and Latin-1 was assumed.
+        let guessed: Bool
+
+        var label: String {
+            let name: String
+            switch encoding {
+            case .utf8:            name = "UTF-8"
+            case .utf16:           name = "UTF-16"
+            case .utf16LittleEndian: name = "UTF-16 LE"
+            case .utf16BigEndian:  name = "UTF-16 BE"
+            case .utf32:           name = "UTF-32"
+            case .isoLatin1:       name = "Latin-1"
+            case .macOSRoman:      name = "Mac OS Roman"
+            case .windowsCP1252:   name = "Windows-1252"
+            default:               name = "Encoding \(encoding.rawValue)"
+            }
+            return guessed ? name + " (assumed)" : name
+        }
+    }
+
+    /// A file that is not text at all. Opening one and letting autosave have
+    /// it is the same data loss by a different road, and a NUL byte outside a
+    /// UTF-16 or UTF-32 file is the cheapest reliable tell there is.
+    func looksBinary(_ data: Data) -> Bool {
+        if data.starts(with: [0xFE, 0xFF]) || data.starts(with: [0xFF, 0xFE]) { return false }
+        if data.starts(with: [0x00, 0x00, 0xFE, 0xFF]) { return false }
+        return data.prefix(8000).contains(0x00)
+    }
+
+    func readTextFile(_ url: URL) -> TextFile? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        if looksBinary(data) { return nil }
+
+        // UTF-8 first and strictly. String(data:encoding:) returns nil on a
+        // byte sequence that is not valid UTF-8, which is the check the old
+        // code was missing.
+        if let s = String(data: data, encoding: .utf8) {
+            return TextFile(text: s, encoding: .utf8, guessed: false)
+        }
+        // A byte-order mark is the one time a file states its own encoding.
+        for (bom, enc) in [([0xFF, 0xFE, 0x00, 0x00], String.Encoding.utf32LittleEndian),
+                           ([0x00, 0x00, 0xFE, 0xFF], .utf32BigEndian),
+                           ([0xFF, 0xFE], .utf16LittleEndian),
+                           ([0xFE, 0xFF], .utf16BigEndian)] {
+            if data.starts(with: bom.map { UInt8($0) }),
+               let s = String(data: data, encoding: enc) {
+                return TextFile(text: s, encoding: enc, guessed: false)
+            }
+        }
+        // Then whatever the system can tell us, which includes the encoding
+        // recorded in the file's extended attributes by other Mac editors.
         var used = String.Encoding.utf8
-        if let s = try? String(contentsOf: url, usedEncoding: &used) { return s }
-        if let d = try? Data(contentsOf: url) { return String(decoding: d, as: UTF8.self) }
+        if let s = try? String(contentsOf: url, usedEncoding: &used) {
+            return TextFile(text: s, encoding: used, guessed: false)
+        }
+        // Last, and never fails.
+        if let s = String(data: data, encoding: .isoLatin1) {
+            return TextFile(text: s, encoding: .isoLatin1, guessed: true)
+        }
         return nil
     }
 
@@ -1603,10 +1689,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     /// keystroke reschedules the write, so one unwritable file produces an
     /// alert roughly once a second.
     @discardableResult
-    func write(_ text: String, to url: URL, silent: Bool = false) -> Bool {
+    func write(_ text: String, to url: URL, silent: Bool = false, tab: DocTab? = nil) -> Bool {
+        let target = tab ?? tabs.first { $0.url?.standardizedFileURL == url.standardizedFileURL }
+        let want = target?.encoding ?? .utf8
+
+        // The file's own encoding first. If the writer has since typed
+        // something it cannot hold — an em dash into a Latin-1 file, an emoji
+        // into anything 8-bit — that write throws rather than mangling, and
+        // the document is promoted to UTF-8 and stays that way. Promoting is
+        // safe in a way the reverse would not be: UTF-8 can hold everything
+        // the old encoding could.
+        if want != .utf8, (try? text.write(to: url, atomically: true, encoding: want)) != nil {
+            stampMTime(url)
+            return true
+        }
         do {
             try text.write(to: url, atomically: true, encoding: .utf8)
             stampMTime(url)                        // don't watch our own write back in
+            if want != .utf8, let target = target {
+                target.encoding = .utf8
+                target.encodingGuessed = false
+                if target.id == activeID { pushEncoding() }
+                if !silent { toast("Saved as UTF-8 — the new text needed it") }
+            }
             return true
         } catch {
             if !silent {
@@ -1615,6 +1720,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             return false
         }
     }
+
+    /// Tells the page what the document in front is encoded as, so the status
+    /// bar can say so. It stays quiet for UTF-8, which is every file anyone
+    /// will open and not worth a word about; anything else is worth knowing
+    /// before you have typed a page into it.
+    func pushEncoding() {
+        guard let tab = activeTab else { return }
+        let label = tab.encoding == .utf8 ? "" : TextFile(text: "", encoding: tab.encoding,
+                                                          guessed: tab.encodingGuessed).label
+        js("if(window.App&&App.setEncoding)App.setEncoding(\(jsLiteral(label)))")
+    }
+
 
     /// Every tab holding this path, so the watcher does not report our own
     /// write back to us as an outside change.
@@ -1637,11 +1754,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             return
         }
 
-        guard let text = readText(url) else {
+        guard let file = readTextFile(url) else {
             presentError("Could not open “\(url.lastPathComponent)”",
-                         "The file could not be read as text.")
+                         "It could not be read as text. Files that are not text are refused "
+                         + "rather than opened, because editing one and saving it back would "
+                         + "destroy it.")
             return
         }
+        let text = file.text
 
         let target: DocTab
         if let current = activeTab, current.url == nil, !current.dirty {
@@ -1654,6 +1774,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
 
         target.dirty = false
+        target.encoding = file.encoding
+        target.encodingGuessed = file.guessed
         // The text first, then the list. loadDoc parks a document named
         // against a tab that is not yet in front, so by the time setTabs
         // switches to it the page already has it — the other order shows an
@@ -1664,6 +1786,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         activeID = target.id
         setDocument(url, tab: target)
         syncWindowToTab()
+        pushEncoding()
     }
 
     func docContentTypes() -> [UTType] {
@@ -1843,7 +1966,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             // Nothing unsaved here, so there is nothing to decide: take the
             // new text, whether or not this is the document on screen.
             guard tab.dirty else {
-                guard let text = readText(url) else { continue }
+                guard let file = readTextFile(url) else { continue }
+                let text = file.text
+                tab.encoding = file.encoding
+                tab.encodingGuessed = file.guessed
                 tab.mtime = now
                 js("if(window.App)App.externalChange(\(jsLiteral(text)),\(tab.id))")
                 continue
@@ -1854,7 +1980,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             // purpose — dropping it here would mark the change as handled and
             // the question would never be asked when you came back to the tab.
             guard tab.id == activeID, let window = window, window.isVisible else { continue }
-            guard let text = readText(url) else { continue }
+            guard let file = readTextFile(url) else { continue }
+            let text = file.text
+            tab.encoding = file.encoding
+            tab.encodingGuessed = file.guessed
             tab.mtime = now
 
             reloadPromptUp = true

@@ -662,6 +662,12 @@ body[data-mode="live"] #divider { opacity: 0; transform: scaleY(.2); width: 0; }
 /* The count only exists while the check is on, and takes its width with it. */
 #stStyle[hidden] { display: none; }
 
+/* The encoding, shown only when it is not UTF-8. A file that is anything else
+   is a file where saving could have gone wrong before this was fixed, and the
+   writer should be able to see which one they are in. */
+#stEnc[hidden] { display: none; }
+#stEnc { color: var(--muted); }
+
 #hl .ln { transition: opacity 260ms var(--ease-soft); }
 body.focus #hl .ln { opacity: .22; }
 body.focus #hl .ln.cur { opacity: 1; }

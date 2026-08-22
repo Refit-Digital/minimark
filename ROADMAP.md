@@ -158,10 +158,29 @@ Nothing else can happen until this is done, and none of it is hard.
 These are the bugs that turn a curious first-time user into a GitHub issue
 titled "lost my file". All are small, contained fixes.
 
-- [ ] **Lossy decode into destructive autosave.** `readText` at
-      `minimark.swift:919`. Try UTF-8, then UTF-16 with BOM, then Latin-1, and
-      if all fail refuse to open rather than mangling. If a file only decoded
-      lossily, open it read-only and say so in the status bar.
+- [x] **Lossy decode into destructive autosave.** Done, 22 August, and the
+      shape it took differs from the plan above in one way worth recording.
+
+      The decode chain is as planned: UTF-8 strictly, then a byte-order mark,
+      then whatever the system can identify, then Latin-1. But Latin-1 never
+      fails — every byte is a valid Latin-1 character — so "refuse rather than
+      mangle" has nothing left to catch, and read-only would punish a large
+      number of perfectly ordinary 8-bit files.
+
+      The corruption was never really in the read. It was in reading Latin-1
+      and writing UTF-8. So the encoding is now remembered per tab and the
+      file is written back in it, which round-trips every byte. Type something
+      the old encoding cannot hold and the file is promoted to UTF-8 and says
+      so, which is the only direction that loses nothing. The status bar names
+      the encoding whenever it is not UTF-8.
+
+      What *is* now refused is a file that is not text at all: a NUL byte
+      outside a UTF-16 or UTF-32 file. Opening a PNG and letting autosave have
+      it was the same data loss by another road, and nothing had stopped it.
+
+      `tools/encoding-test.js` compiles the real decoder out of `minimark.swift`
+      and runs actual files through it, down to asserting that the 0xE9 in a
+      Latin-1 file is still 0xE9 after an edit and a save.
 - [~] **Autosave alert storm.** Half done: `write` now takes `silent:` and
       autosave passes it, so the sheet storm is gone. The counting and the one
       warning after the third failure are still to do — as it stands an

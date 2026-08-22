@@ -2176,6 +2176,20 @@
         }
         node.textContent = css;
       },
+    /* What the document in front is encoded as, or '' for UTF-8. The shell
+       sends the empty string rather than "UTF-8" because every file anybody
+       opens is UTF-8 and a status bar that says so all day says nothing; the
+       one that is Latin-1 is the one worth a word about, before a page has
+       been typed into it. */
+    setEncoding: function (label) {
+        var node = document.getElementById('stEnc');
+        if (!node) return;
+        node.textContent = label || '';
+        node.hidden = !label;
+        node.title = label ? 'This file is not UTF-8. It is saved back in the encoding it '
+                           + 'arrived in, and promoted to UTF-8 only if you type something '
+                           + 'that encoding cannot hold.' : '';
+      },
     setPrefs: function (p) {
       p = p || {};
       if (p.themeAuto != null) theme.auto = p.themeAuto === '1';
