@@ -310,15 +310,14 @@ value.
 
 1. **Alt-text prompt on image insert.** Images currently go in as bare
    `![](name)` at `ui.js:1517`. Small change, immediately noticeable.
-2. **User CSS hook.** Six hardcoded themes at `styles.css:77-153` with no user
-   stylesheet. Cheap to add, and exactly the sort of thing an open-source
-   audience does with an editor. Likely to generate contributed themes, which is
-   free content for the project.
+2. ~~**User CSS hook.**~~ **Done, 22 August**, and widened into templates —
+   see the block below.
 3. **Table editing.** There is an insert-table snippet at `ui.js:598` and a
    Tab-key tidy pass, but no add or delete row and column, no alignment
    controls.
 4. **Mermaid diagrams.** KaTeX is already wired in at `app.js:287`, so the
    pattern for a block-level renderer exists.
+
 5. ~~**Multiple windows and tabs.**~~ **Tabs: done, August 2026.** One window,
    several documents, in a strip that stays off screen until the pointer
    reaches the top edge of the window. The shape it took is written up in
@@ -337,8 +336,49 @@ value.
    `tabbingMode = .disallowed`. It would want a per-window controller holding
    the tab list, which is now a contained thing to move.
 
-Items 1 to 4 are also the natural "good first issue" set if anyone turns up
+Items 1, 3 and 4 are also the natural "good first issue" set if anyone turns up
 wanting to contribute.
+
+### Done, 22 August: the three gaps worth closing against iA Writer
+
+Compared feature by feature against iA Writer 8. Most of the gap is out of
+scope on purpose — a Library, iCloud and Dropbox sync, publishing to Ghost and
+WordPress, mobile, ten localisations, Authorship. Each is months. Three were
+cheap enough to be worth it, and all three are in.
+
+- **Style check.** Fillers, clichés and redundancies, underlined in the
+  rendered document, with the reason on hover and a count in the status bar
+  that steps through them. `style-check.js` is the dictionary and the matcher,
+  kept as its own file because it is the part people will want to argue with;
+  `ui.js` does the marking. Deliberately not attempted: parts of speech, which
+  is what iA's Syntax Highlight does and which needs a tagger to do at all
+  well. A style checker that cries wolf gets switched off, and then the good
+  half goes with it.
+
+- **Templates.** Two optional files in Application Support, and a File menu
+  item that creates and reveals them. `user.css` goes into the editor after
+  everything else, so it can restyle any theme without `!important`, and it
+  reaches print and PDF for free because both paginate the live web view.
+  `export.html` is the shell for Export as HTML, with `{{body}}`, `{{title}}`,
+  `{{style}}`, `{{usercss}}` and `{{date}}`. Both starters ship inert. The
+  edit loop is: change the file, switch back to the app, see it —
+  `applicationDidBecomeActive` re-reads and only pushes on a real change.
+
+- **Wikilinks.** `[[Another note]]` and `[[Another note|labelled]]`, resolved
+  by the shell against the document's own folder. Written as a marked
+  extension rather than a regex pass, which is what makes `[[this]]` inside
+  backticks stay literal without anyone having to think about it. A target is
+  a bare filename: no separators, no `..`, and the resolved path is checked to
+  land in the document's folder afterwards as well as before. Clicking one
+  that does not exist offers to create it, in a sheet — **worth a second
+  opinion, since it is the one path here that writes a file from a click.**
+
+Left rather than guessed at: a missing wikilink target looks the same as one
+that exists, because telling them apart means the shell answering a round trip
+for every link on screen. And style check is English only.
+
+The suite is 153 assertions across six tools now, all of it runnable with one
+`npm test` in `tools/`.
 
 ---
 
