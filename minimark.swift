@@ -1212,6 +1212,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             guard let key = body["key"] as? String, kPrefKeys.contains(key) else { return }
             UserDefaults.standard.set(body["value"] as? String ?? "", forKey: key)
 
+        case "openWiki":
+            if let name = body["name"] as? String { openWikilink(name) }
+
         case "histWrite":
             // An empty payload would truncate the sidecar to nothing, and load()
             // treats an empty file as no history at all. The web layer sends
@@ -2409,6 +2412,91 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                                 height: info.paperSize.height - info.topMargin - info.bottomMargin)
         op.jobTitle = docURL?.deletingPathExtension().lastPathComponent ?? "Untitled"
         return op
+    }
+
+    // ------------------------------------------------------------------
+    // Wikilinks
+    //
+    // [[Another note]] resolves to a file beside the one it was written in.
+    // The shell does the resolving because the shell is the half that owns
+    // the folder; the page knows a name and nothing else.
+    //
+    // A name is a filename and only a filename. No separators, no "..", no
+    // leading dot, and it has to land in the document's own folder when it is
+    // resolved — checked afterwards as well as before, because the two are
+    // not the same question once the file system has had its say about
+    // symlinks and case. A document is data, and data does not get to name a
+    // path for the app to open.
+    // ------------------------------------------------------------------
+
+    /// The file a wikilink names, or nil if the name is not one this will
+    /// touch. `.md` is added when there is no extension, which is what makes
+    /// [[Another note]] rather than [[Another note.md]] the thing people write.
+    func wikiURL(_ raw: String) -> URL? {
+        let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count < 256,
+              !name.hasPrefix("."),                        // .hidden, and ".." with it
+              !name.contains("/"), !name.contains(":"),    // path separators, both of them
+              !name.contains("\0"),
+              let dir = docURL?.deletingLastPathComponent()
+        else { return nil }
+
+        var file = name
+        if (name as NSString).pathExtension.isEmpty { file += ".md" }
+        let url = dir.appendingPathComponent(file).standardizedFileURL
+        // The belt to the braces above: whatever the name was, the answer has
+        // to be a file sitting directly in this document's folder.
+        guard url.deletingLastPathComponent().standardizedFileURL.path
+                == dir.standardizedFileURL.path else { return nil }
+        return url
+    }
+
+    func openWikilink(_ name: String) {
+        guard let url = wikiURL(name) else {
+            // An untitled document has no folder for a link to be relative to,
+            // which is the common way to arrive here and worth saying plainly
+            // rather than doing nothing.
+            if docURL == nil {
+                presentError("Nothing to link from",
+                             "Save this document first. A wikilink points at a file "
+                             + "beside it, and an unsaved document is not beside anything yet.")
+            } else {
+                presentError("Not a file name",
+                             "“\(name)” cannot be used as a wikilink. A wikilink names a file "
+                             + "in the same folder, without a path.")
+            }
+            return
+        }
+
+        if FileManager.default.fileExists(atPath: url.path) {
+            openDocument(at: url)
+            return
+        }
+
+        // Creating it is the useful thing to do and the whole reason people
+        // write a link to a note they have not written yet. It still asks,
+        // because a click that silently writes a file to disk is not something
+        // to do on the strength of one click.
+        let alert = NSAlert()
+        alert.messageText = "Create “\(url.lastPathComponent)”?"
+        alert.informativeText = "There is no file by that name in this folder yet."
+        alert.addButton(withTitle: "Create")
+        alert.addButton(withTitle: "Cancel")
+        let make: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self = self, response == .alertFirstButtonReturn else { return }
+            do {
+                try "".write(to: url, atomically: true, encoding: .utf8)
+                self.openDocument(at: url)
+            } catch {
+                self.presentError("Could not create “\(url.lastPathComponent)”",
+                                  error.localizedDescription)
+            }
+        }
+        if let w = window, w.isVisible {
+            alert.beginSheetModal(for: w, completionHandler: make)
+        } else {
+            make(alert.runModal())
+        }
     }
 
     /// Opens ~/Library/Application Support/minimark/ in Finder, writing the

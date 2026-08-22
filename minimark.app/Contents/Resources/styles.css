@@ -738,6 +738,15 @@ body.focus #doc > .blk.cur { opacity: 1; }
 #doc p { margin: 0 0 1.05em; }
 #doc a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--accent-soft); transition: border-color 160ms; }
 #doc a:hover { border-bottom-color: var(--accent); }
+
+/* A wikilink points at a file beside this one, not out at the web, and it
+   should not look like it does. Dashed rather than solid, and no underline
+   creeping in from the rule above. */
+#doc a.wikilink {
+  cursor: pointer;
+  border-bottom: 1px dashed var(--accent-soft);
+}
+#doc a.wikilink:hover { border-bottom-color: var(--accent); border-bottom-style: solid; }
 #doc strong { font-weight: 650; }
 #doc em { font-style: italic; }
 #doc del { color: var(--muted); }

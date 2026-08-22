@@ -311,6 +311,52 @@ window.MM = (function () {
   /* ---------------- markdown pipeline ---------------- */
   marked.setOptions({ gfm: true, breaks: false });
 
+  /* ---------------- wikilinks ----------------
+     [[Another note]] and [[Another note|what to call it here]].
+
+     Registered as a marked extension rather than done with a regex pass over
+     the source, which is what the footnote handling above does. The reason is
+     code: marked has already decided what is a code span and what is a fence
+     by the time an inline tokenizer is asked, so `[[this]]` in backticks stays
+     literal for free. A regex pre-pass has to work that out for itself and
+     gets it wrong the first time somebody writes about wikilinks.
+
+     The target is a bare filename by design — no slashes, no `..`, no path.
+     That is what the syntax means in every tool that has it, and it means the
+     shell can resolve it against the document's own folder and refuse
+     anything that lands outside, rather than having to reason about a path a
+     document handed it. */
+  var WIKI = /^\[\[([^\[\]|\n]+?)(?:\|([^\[\]\n]*))?\]\]/;
+
+  marked.use({
+    extensions: [{
+      name: 'wikilink',
+      level: 'inline',
+      /* marked calls this to find the next place worth trying, so returning
+         the real index rather than 0 keeps it from tokenising every
+         character of every paragraph */
+      start: function (src) { var i = src.indexOf('[['); return i < 0 ? undefined : i; },
+      tokenizer: function (src) {
+        var m = WIKI.exec(src);
+        if (!m) return;
+        var target = m[1].trim();
+        if (!target) return;
+        return {
+          type: 'wikilink', raw: m[0],
+          target: target,
+          label: (m[2] == null ? '' : m[2].trim()) || target
+        };
+      },
+      renderer: function (t) {
+        /* No href at all. A wikilink is not a URL and giving it one would
+           mean the sanitiser's URL rules, the browser's navigation and the
+           rel="noopener" pass all had an opinion about a string that is just
+           a filename. The click handler reads data-wiki and nothing else. */
+        return '<a class="wikilink" data-wiki="' + esc(t.target) + '">' + esc(t.label) + '</a>';
+      }
+    }]
+  });
+
   /* ---------------- sanitiser ----------------
      Markdown may carry raw HTML and marked passes it straight through, so
      everything on its way to innerHTML comes through here. This is an
@@ -341,7 +387,7 @@ window.MM = (function () {
     .split(' ').forEach(function (t) { KILL_TAGS[t] = 1; });
 
   var OK_ATTR = {};
-  'href src alt title class id lang dir width height align colspan rowspan scope headers span start reversed value type checked disabled open datetime cite label'
+  'href src alt title class id lang dir width height align colspan rowspan scope headers span start reversed value type checked disabled open datetime cite label data-wiki'
     .split(' ').forEach(function (a) { OK_ATTR[a] = 1; });
 
   var URL_ATTR = { href: 1, src: 1, cite: 1 };
@@ -717,6 +763,13 @@ window.MM = (function () {
   /* ---------------- raw pane tinting ---------------- */
   function inlineTint(s) {
     s = s.replace(/`([^`]+)`/g, '<span class="t-code">`$1`</span>');
+    /* Before the ordinary link rule, which would otherwise take the inner
+       pair of brackets and leave the outer two sitting there untinted. */
+    s = s.replace(/(\[\[)([^\[\]|\n]+?)(?:(\|)([^\[\]\n]*))?(\]\])/g, function (m, o, target, bar, label, c) {
+      return '<span class="t-mark">' + o + '</span><span class="t-link">' + target + '</span>' +
+             (bar ? '<span class="t-mark">' + bar + '</span><span class="t-link">' + label + '</span>' : '') +
+             '<span class="t-mark">' + c + '</span>';
+    });
     s = s.replace(/(!?\[)([^\]]*)(\])(\([^)]*\))/g,
       '<span class="t-mark">$1</span><span class="t-link">$2</span><span class="t-mark">$3$4</span>');
     s = s.replace(/(\*\*|__)(?=\S)([\s\S]*?\S)\1/g,
@@ -1140,6 +1193,30 @@ window.MM = (function () {
     downInEdit = !!(t && t.closest && t.closest('.blk-edit'));
   }, true);
 
+  /* A wikilink was clicked: tell the shell, which owns the folder and is the
+     only half that can say whether the file is there. Returns true when it
+     handled the event, so the caller can stop.
+
+     Held ⌘ is deliberately not special here the way it is for a web link.
+     There is nothing else a wikilink could usefully do. */
+  function followWiki(e) {
+    var a = e.target && e.target.closest ? e.target.closest('a.wikilink') : null;
+    var name = a && a.getAttribute('data-wiki');
+    if (!name) return false;
+    e.preventDefault();
+    send('openWiki', { name: name });
+    return true;
+  }
+
+  /* Live view catches this on mouseup, before the block it is in becomes a
+     textarea. Split view has no such race and can use the click, which is
+     what a link should answer to. */
+  el.doc.addEventListener('click', function (e) {
+    if (state.mode === 'live') return;
+    var sel = window.getSelection();
+    if (sel && !sel.isCollapsed) return;
+    followWiki(e);
+  });
 
   el.doc.addEventListener('mouseup', function (e) {
     if (state.mode !== 'live') return;
@@ -1147,6 +1224,10 @@ window.MM = (function () {
     if (e.target.closest('.blk-edit')) return;
     var sel = window.getSelection();
     if (sel && !sel.isCollapsed) return;
+    /* Before the link rule below and before the block opens: a wikilink is
+       for following, and in live view the block would otherwise be turned
+       into a textarea by the same click, taking the link with it. */
+    if (followWiki(e)) return;
     if (e.target.tagName === 'A') { if (e.metaKey) return; e.preventDefault(); }
     if (e.target.tagName === 'INPUT') return;
 
