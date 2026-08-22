@@ -816,6 +816,9 @@ window.MM = (function () {
     invalidateAnchors();
     if (top !== null && el.prevPane.scrollTop !== top) setScroll('prev', top);
     if (MM.onDocRendered) MM.onDocRendered();
+    /* every block node the bin could have been parked against has just been
+       thrown away, and the index it held may now name a different block */
+    hideBin();
     markCurrentBlock();
   }
 
@@ -1123,8 +1126,24 @@ window.MM = (function () {
     if (wrapOnType(ta, e)) return;
   }
 
+  /* Where the pointer went down. A drag that begins inside an open block
+     belongs to that block's textarea for as long as it lasts, including after
+     the pointer has left it — which is exactly what selecting upwards does the
+     moment it reaches the top edge. Neither handler below can work that out
+     from the event it is given: a textarea's selection is not part of the
+     document selection, so window.getSelection() reports "collapsed", the
+     guard that asks it waves the drag through, and the block is committed and
+     rebuilt underneath the selection being made. */
+  var downInEdit = false;
+  document.addEventListener('pointerdown', function (e) {
+    var t = e.target;
+    downInEdit = !!(t && t.closest && t.closest('.blk-edit'));
+  }, true);
+
+
   el.doc.addEventListener('mouseup', function (e) {
     if (state.mode !== 'live') return;
+    if (downInEdit) return;
     if (e.target.closest('.blk-edit')) return;
     var sel = window.getSelection();
     if (sel && !sel.isCollapsed) return;
@@ -1150,6 +1169,7 @@ window.MM = (function () {
      because that one is bound to #doc. */
   el.prevPane.addEventListener('mouseup', function (e) {
     if (state.mode !== 'live') return;
+    if (downInEdit) return;
     if (e.target !== el.prevPane && e.target !== el.doc) return;
     var sel = window.getSelection();
     if (sel && !sel.isCollapsed) return;
@@ -1175,6 +1195,205 @@ window.MM = (function () {
     if (!String(state.blocks[n - 1] || '').trim()) editBlock(n - 1, null, false);
     else insertEmptyBlockAt(n);
   }
+
+  /* ---------------- selection across rendered blocks ----------------
+     Only the block being written in is a field. Every other one is ordinary
+     rendered HTML, so a selection that spans them belongs to the document and
+     nothing was listening for it: Backspace did nothing, typing did nothing,
+     and ⌘C handed over the rendered text rather than the markdown behind it.
+     Everything below maps such a selection back onto state.text and edits the
+     document itself, which is the only place a cross-block edit can happen. */
+
+  /* One end of a selection, as a block index and an offset into that block's
+     markdown. Rendered offsets and source offsets are different things —
+     '**bold**' is eight characters of source and four of text — which is what
+     mapRenderedToSource is for; it is the same walk the click-to-caret path
+     already does, so the two agree by construction. */
+  function blkPoint(node, offset) {
+    var host = node && (node.nodeType === 1 ? node : node.parentNode);
+    var blk = host && host.closest ? host.closest('.blk') : null;
+    if (!blk || !el.doc.contains(blk)) return null;
+    var i = parseInt(blk.dataset.i, 10);
+    if (!(i >= 0) || state.blocks[i] == null) return null;
+    var pre = document.createRange();
+    pre.selectNodeContents(blk);
+    try { pre.setEnd(node, offset); } catch (err) { return null; }
+    return { i: i, off: mapRenderedToSource(state.blocks[i], pre.toString().replace(/^\s+/, '').length) };
+  }
+
+  /* What the current selection covers, in state.text offsets, or null when
+     there is nothing here to act on — a caret rather than a selection, a
+     selection inside a field that owns it already, or the source view, where
+     the textarea does all of this itself. */
+  function renderedRange() {
+    if (state.mode !== 'live' || state.editing) return null;
+    var sel = window.getSelection();
+    if (!sel || !sel.rangeCount || sel.isCollapsed) return null;
+    var r = sel.getRangeAt(0);
+    var a = blkPoint(r.startContainer, r.startOffset);
+    var b = blkPoint(r.endContainer, r.endOffset);
+    if (!a || !b) return null;
+    var spans = blockSpans();
+    if (!spans[a.i] || !spans[b.i]) return null;
+    var from = spans[a.i][0] + a.off, to = spans[b.i][0] + b.off;
+    if (to < from) { var t = from; from = to; to = t; }
+    return from === to ? null : { from: from, to: to };
+  }
+
+  /* Whole blocks taken out leave a separator behind on each side, so the two
+     halves meet across a run of blank lines rather than the single gap the
+     writer would expect, and at either end of the document across a gap with
+     nothing on the far side of it at all. Only a run that is purely newlines
+     is touched: anything else is the writer's own indentation, and squaring
+     that up is not this function's business. */
+  function collapseSeam(text, at) {
+    var a = at, b = at;
+    while (a > 0 && text[a - 1] === '\n') a--;
+    while (b < text.length && text[b] === '\n') b++;
+    if (b - a < 3) return { text: text, at: at };
+    var edge = (a === 0 || b === text.length);
+    return {
+      text: text.slice(0, a) + (edge ? '' : '\n\n') + text.slice(b),
+      at: a + (edge ? 0 : 2)
+    };
+  }
+
+  /* Replace everything the selection covers with `insert` and leave the writer
+     in the block where the two halves met, caret at the join. Returns false
+     when there was no such selection, so callers can fall through to whatever
+     they would otherwise have done. */
+  function replaceRendered(insert) {
+    var r = renderedRange();
+    if (!r) return false;
+    undoMark(true);
+    var joined = collapseSeam(state.text.slice(0, r.from) + insert + state.text.slice(r.to),
+                              r.from + insert.length);
+    var sel = window.getSelection();
+    if (sel) sel.removeAllRanges();
+    state.text = joined.text;
+    el.src.value = state.text;
+    paintSource(); renderDoc(true); updateStatus(); markDirty(true);
+    var i = blockIndexForOffset(joined.at);
+    var span = blockSpans()[i];
+    editBlock(i, span ? joined.at - span[0] : null, false);
+    return true;
+  }
+
+  /* Anything with a modifier on it already belongs to somebody — the shortcut
+     map in ui.js, the find bar, the command palette — and so does anything
+     typed while a field has focus. What is left is the plain typing and
+     deleting a writer would expect to land on the text they have highlighted. */
+  document.addEventListener('keydown', function (e) {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    var t = document.activeElement;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    if (!renderedRange()) return;
+    if (e.key === 'Backspace' || e.key === 'Delete') { e.preventDefault(); replaceRendered(''); return; }
+    if (e.key === 'Enter') { e.preventDefault(); replaceRendered('\n\n'); return; }
+    /* one character is a printable key; 'Shift', 'ArrowUp' and 'Process' are
+       not, and neither is anything an input method is still composing */
+    if (e.key.length === 1) { e.preventDefault(); replaceRendered(e.key); }
+  });
+
+  /* The clipboard should carry what the document says, not what it looks
+     like. Copying rendered text meant pasting a heading back in as a plain
+     line and a list back in as a run of sentences. */
+  document.addEventListener('copy', function (e) {
+    var r = renderedRange();
+    if (!r || !e.clipboardData) return;
+    e.preventDefault();
+    e.clipboardData.setData('text/plain', state.text.slice(r.from, r.to));
+  });
+
+  document.addEventListener('cut', function (e) {
+    var r = renderedRange();
+    if (!r || !e.clipboardData) return;
+    e.preventDefault();
+    e.clipboardData.setData('text/plain', state.text.slice(r.from, r.to));
+    replaceRendered('');
+  });
+
+  /* Pasting over a rendered selection converts the same way onPaste does for
+     a textarea, and has to, or the two paths disagree about what a paste from
+     a browser turns into depending on where the caret happened to be. */
+  document.addEventListener('paste', function (e) {
+    if (!renderedRange() || !e.clipboardData) return;
+    e.preventDefault();
+    var plain = e.clipboardData.getData('text/plain') || '';
+    var html = e.clipboardData.getData('text/html') || '';
+    var insert = plain;
+    if (html && /<(p|div|h[1-6]|ul|ol|li|table|blockquote|pre|strong|em|a)\b/i.test(html) && td()) {
+      try { insert = td().turndown(html).trim(); } catch (err) { insert = plain; }
+    }
+    replaceRendered(insert);
+  });
+
+  /* ---------------- deleting a block ----------------
+     A soft bin in the right-hand gutter of whichever block the pointer is
+     over. One node that moves, rather than one per block: renderDoc tears
+     down and rebuilds every block, and anything living inside a .blk would
+     end up in the selection, in copied text, in exported HTML and in the
+     character count mapRenderedToSource walks to place the caret. Out here in
+     the pane's own box it is none of those things. */
+  var bin = document.createElement('button');
+  var binFor = -1;
+  bin.id = 'blkBin';
+  bin.type = 'button';
+  bin.tabIndex = -1;
+  bin.title = 'Delete this paragraph';
+  bin.setAttribute('aria-label', 'Delete this paragraph');
+  bin.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" ' +
+                  'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+                  '<path d="M2.9 4.4h10.2M6.4 4.4V2.9h3.2v1.5M4.4 4.4l.55 8.05a1 1 0 0 0 1 .95h4.1a1 1 0 0 0 1-.95L11.6 4.4"/>' +
+                  '<path d="M6.7 6.8v4.2M9.3 6.8v4.2"/></svg>';
+  el.prevPane.appendChild(bin);
+
+  function hideBin() { binFor = -1; if (bin) bin.classList.remove('on'); }
+
+  function showBinOn(blk) {
+    var i = parseInt(blk.dataset.i, 10);
+    /* nothing to delete a document down to nothing with, and never over the
+       block being written in, where the caret is the thing under the pointer */
+    if (!(i >= 0) || state.blocks.length < 2 || (state.editing && state.editing.i === i)) return hideBin();
+    binFor = i;
+    /* .blk is positioned, #doc is not, so both of these are already in the
+       pane's coordinates — the same ones the bin is placed in */
+    var want = blk.offsetLeft + blk.offsetWidth + 12;
+    var room = el.prevPane.clientWidth - bin.offsetWidth - 8;
+    bin.style.left = Math.max(0, Math.min(want, room)) + 'px';
+    bin.style.top = blk.offsetTop + 'px';
+    bin.classList.add('on');
+  }
+
+  el.doc.addEventListener('mouseover', function (e) {
+    if (state.mode !== 'live') return hideBin();
+    var blk = e.target.closest ? e.target.closest('.blk') : null;
+    if (blk) showBinOn(blk);
+    /* and no else. Leaving a block for the gutter must not take the bin with
+       it, because the gutter is precisely where the writer is reaching. */
+  });
+  el.prevPane.addEventListener('mouseleave', hideBin);
+
+  /* Keep the focus where it is: without this the open block blurs on the way
+     down, commits on a timer, and the click lands after the renumbering. */
+  bin.addEventListener('mousedown', function (e) { e.preventDefault(); });
+
+  bin.addEventListener('click', function (e) {
+    e.preventDefault(); e.stopPropagation();
+    var i = binFor;
+    if (i < 0) return;
+    /* a block open elsewhere still holds text state.text has not been told
+       about, and committing it can drop an empty one, which renumbers
+       everything below it */
+    if (commitEditing() && lastDropped >= 0 && i > lastDropped) i--;
+    if (i < 0 || i >= state.blocks.length || state.blocks.length < 2) { hideBin(); return; }
+    undoMark(true);
+    state.text = dropBlockText(i);
+    el.src.value = state.text;
+    hideBin();
+    paintSource(); renderDoc(true); updateStatus(); markDirty(true);
+    undoBreak();
+  });
 
   /* ---------------- smart editing helpers ---------------- */
   /* ---------------- undo ----------------

@@ -656,6 +656,35 @@ body[data-mode="split"] #doc { max-width: 38rem; padding: calc(34px + var(--titl
 body.focus #doc > .blk { opacity: .26; }
 body.focus #doc > .blk.cur { opacity: 1; }
 
+/* The delete affordance. One button for the whole document, moved to
+   whichever block the pointer is over, and parked in the padding to the right
+   of the measure rather than inside the block — a node inside a .blk would be
+   swept into the selection, into copied text, into exported HTML, and into
+   the character count that places the caret on a click.
+
+   It is a child of #previewPane, which is the scroller, so it is positioned
+   against the padding box and travels with the text rather than hovering over
+   a fixed spot on the pane while the document moves underneath it.
+
+   Barely there until it is wanted: .22 while its block is hovered, full
+   strength only under the pointer. Anything louder turns every paragraph
+   into a row of controls, which is the opposite of the point. */
+#blkBin {
+  position: absolute; z-index: 3;
+  display: grid; place-items: center;
+  width: 28px; height: 28px; padding: 0; margin: 0;
+  border: 0; border-radius: 8px; background: transparent;
+  color: var(--muted); cursor: pointer;
+  opacity: 0; pointer-events: none;
+  transition: opacity 200ms var(--ease-soft), color 200ms var(--ease-soft),
+              background 200ms var(--ease-soft);
+}
+#blkBin.on { opacity: .22; pointer-events: auto; }
+#blkBin.on:hover, #blkBin.on:focus-visible { opacity: 1; color: var(--ink); background: var(--rule); }
+#blkBin svg { display: block; width: 15px; height: 15px; }
+/* Printing and PDF export walk the pane, not just the measure. */
+@media print { #blkBin { display: none; } }
+
 #doc h1,#doc h2,#doc h3,#doc h4,#doc h5,#doc h6 {
   font-weight: 680; letter-spacing: -.021em; line-height: 1.25;
   color: var(--ink); margin: 1.9em 0 .55em;
