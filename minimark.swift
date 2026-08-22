@@ -90,7 +90,147 @@ let kImageExtensions = ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif",
 /// file — see HistoryStore. The key is left in kLegacyHistoryKey only so an
 /// existing install can be migrated off it once, on first launch.
 let kPrefKeys = ["theme", "themeAuto", "themeLight", "themeDark", "font", "size",
-                 "zen", "focus", "typewriter", "mode", "scroll", "fmtUse", "tabsPin"]
+                 "zen", "focus", "typewriter", "styleCheck", "mode", "scroll",
+                 "fmtUse", "tabsPin"]
+
+// ============================================================================
+// Templates
+//
+// Two optional files in ~/Library/Application Support/minimark/. Neither has
+// to exist; both change what the app does the moment they do.
+//
+//   user.css     goes into the editor after styles.css, so it can restyle any
+//                of the six themes, the style-check underlines, the measure,
+//                the typography — anything the app draws. Print and PDF get it
+//                for free, because both paginate that same live web view.
+//
+//   export.html  the shell for Export as HTML. Without it the built-in
+//                document is used. With it, these are substituted:
+//
+//                  {{body}}      the rendered document
+//                  {{title}}     the file's name, without its extension
+//                  {{style}}     the built-in export CSS, then user.css
+//                  {{usercss}}   user.css alone, for a template with its own
+//                  {{date}}      today, as the writer's locale writes it
+//
+// Read on demand rather than cached, because the whole point is that editing
+// them and coming back to the app shows the change. It is two small files on
+// a warm page cache; the read is not worth a watcher.
+// ============================================================================
+enum Templates {
+    static var dir: URL? {
+        let fm = FileManager.default
+        guard let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        else { return nil }
+        let dir = base.appendingPathComponent("minimark", isDirectory: true)
+        if !fm.fileExists(atPath: dir.path) {
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        return dir
+    }
+
+    /// A template file is a person's own writing, and the encodings a text
+    /// editor might have left it in are the same ones a document could arrive
+    /// in. Trying UTF-8 and then Latin-1 costs nothing and means a stylesheet
+    /// with a curly quote in a comment does not silently come back empty.
+    private static func read(_ name: String) -> String? {
+        guard let url = dir?.appendingPathComponent(name),
+              let data = try? Data(contentsOf: url), !data.isEmpty else { return nil }
+        if let s = String(data: data, encoding: .utf8) { return s }
+        return String(data: data, encoding: .isoLatin1)
+    }
+
+    static func userCSS() -> String { return read("user.css") ?? "" }
+    static func exportTemplate() -> String? { return read("export.html") }
+
+    /// Written once, only if nothing is there. Never overwrites: somebody who
+    /// has emptied a file meant to empty it, and finding your stylesheet
+    /// replaced by a sample because you deleted its contents would be its own
+    /// kind of data loss.
+    static func writeStartersIfMissing() {
+        guard let dir = dir else { return }
+        let fm = FileManager.default
+        let css = dir.appendingPathComponent("user.css")
+        if !fm.fileExists(atPath: css.path) {
+            try? kStarterUserCSS.write(to: css, atomically: true, encoding: .utf8)
+        }
+        let tpl = dir.appendingPathComponent("export.html")
+        if !fm.fileExists(atPath: tpl.path) {
+            try? kStarterExportTemplate.write(to: tpl, atomically: true, encoding: .utf8)
+        }
+    }
+}
+
+/// Commented out in full, so the file does nothing until somebody means it to.
+let kStarterUserCSS = """
+/* minimark — your own stylesheet.
+
+   Anything here is applied after the app's own CSS and after the theme, so
+   you can change any of it without !important. It reaches the editor, print
+   and PDF export. Delete the comment markers around a rule to turn it on.
+
+   The app's variables are the easiest way in. These are the ones worth
+   knowing; there are more in styles.css inside the app bundle.
+
+     --measure     how wide a line of prose is allowed to get
+     --ink         the text colour        --paper   the background
+     --accent      links, the caret, find highlights
+     --rule        hairlines and borders  --muted   secondary text
+     --prose       the body typeface      --mono    the source pane's
+
+   Style check has three of its own:
+
+     --sc-filler   --sc-cliche   --sc-redundancy
+*/
+
+/*
+:root {
+  --measure: 44rem;
+}
+
+#doc {
+  line-height: 1.8;
+}
+
+:root {
+  --sc-filler:     #7d8f7a;
+  --sc-cliche:     #a08a5c;
+  --sc-redundancy: #a86a6a;
+}
+*/
+"""
+
+let kStarterExportTemplate = """
+<!-- minimark — the shell for Export as HTML.
+
+     Delete this file to go back to the built-in one. What gets substituted:
+
+       {{body}}      the rendered document
+       {{title}}     the file's name, without its extension
+       {{style}}     the built-in export CSS, then your user.css
+       {{usercss}}   your user.css on its own, for a page with its own styles
+       {{date}}      today, in your locale
+
+     This starter is the built-in document with the placeholders left in, so
+     it is a working page you can cut down rather than a blank one you have to
+     build up. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{title}}</title>
+<style>
+{{style}}
+</style>
+</head>
+<body>
+<main>
+{{body}}
+</main>
+</body>
+</html>
+"""
 
 let kLegacyHistoryKey = "history"
 let kLastDocKey = "lastDocumentPath"
@@ -522,6 +662,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     var window: MainWindow!
     var web: WKWebView!
+
+    /// The user stylesheet as the page last saw it. Kept so that re-reading
+    /// the file on every activation is free when nothing has changed, which
+    /// is nearly always: without it, every switch back to the app would push
+    /// a <style> replacement and make the document flash.
+    var lastUserCSS: String? = nil
     var strip: DragStrip!            // the bar: takes the mouse where the chrome is
     var edge: DragStrip!             // slim grabbable margin along the top
     var stripX: NSLayoutConstraint!  // slides that strip to follow the bar
@@ -584,6 +730,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     // ------------------------------------------------------------------
     // Launch
     // ------------------------------------------------------------------
+
+    /// Coming back to the app re-reads the user stylesheet. That is the whole
+    /// edit loop for it: change user.css in whatever you edit CSS in, switch
+    /// back, see it. pushUserCSS compares against what the page already has,
+    /// so an activation that changed nothing costs one small file read and
+    /// sends no message at all.
+    func applicationDidBecomeActive(_ note: Notification) {
+        guard webReady else { return }
+        pushUserCSS()
+    }
 
     func applicationDidFinishLaunching(_ note: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -1002,6 +1158,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         js("if(window.App)App.setSystemTheme(\(jsLiteral(dark ? "dark" : "light")))")
     }
 
+    /// The writer's own stylesheet, into the editor. It goes in after
+    /// styles.css and after the theme, so it wins on specificity ties without
+    /// anybody having to write !important, and it reaches print and PDF for
+    /// free because both of those paginate this same live web view.
+    func pushUserCSS() {
+        let css = Templates.userCSS()
+        if css == lastUserCSS { return }
+        lastUserCSS = css
+        js("if(window.App&&App.setUserCSS)App.setUserCSS(\(jsLiteral(css)))")
+    }
+
     func pushSaved(_ url: URL, tab: DocTab? = nil) {
         let id = (tab ?? activeTab)?.id ?? activeID
         js("if(window.App)App.setSaved(\(jsLiteral(url.lastPathComponent))," +
@@ -1178,6 +1345,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         pushHistory()
         pushRecents()
         pushSystemTheme()
+        pushUserCSS()
         applyChrome()
 
         if let url = pendingOpen {
@@ -2013,6 +2181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         case "open":       menuOpen(nil)
         case "save":       menuSave(nil)
         case "saveAs":     menuSaveAs(nil)
+        case "templates":  menuTemplates(nil)
         case "exportHTML": menuExportHTML(nil)
         case "exportPDF":  menuExportPDF(nil)
         case "print":      menuPrint(nil)
@@ -2242,6 +2411,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         return op
     }
 
+    /// Opens ~/Library/Application Support/minimark/ in Finder, writing the
+    /// two starter files first if they are not there. Both are inert as
+    /// shipped — the CSS is entirely inside a comment and the template is the
+    /// built-in page — so opening the folder cannot change how the app looks
+    /// until somebody decides it should.
+    @objc func menuTemplates(_ sender: Any?) {
+        Templates.writeStartersIfMissing()
+        guard let dir = Templates.dir else {
+            presentError("Could not open the templates folder",
+                         "minimark could not reach its Application Support folder.")
+            return
+        }
+        NSWorkspace.shared.open(dir)
+    }
+
     /// Edits the shared print info directly, so paper size and margins stick
     /// for the next print rather than being thrown away with a copy.
     @objc func menuPageSetup(_ sender: Any?) {
@@ -2318,11 +2502,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
     }
 
+    /// The stylesheet the exported page carries: the built-in one, then the
+    /// writer's own, in that order so theirs wins.
+    func exportCSS() -> String {
+        let user = Templates.userCSS()
+        return user.isEmpty ? kExportCSS : kExportCSS + "\n\n/* user.css */\n" + user
+    }
+
     func htmlDocument(title: String, body: String) -> String {
         let safeTitle = title
             .replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
+
+        // A template's own placeholders are filled and nothing else is
+        // touched. Substitution is one pass over a fixed set of names rather
+        // than anything resembling a template language: this is somebody's
+        // HTML file, and the least surprising thing to do with it is put four
+        // strings into it and leave.
+        //
+        // {{body}} goes in last, on purpose. It is the only substitution whose
+        // value could itself contain the characters "{{title}}", and filling
+        // it first would then let a document rewrite its own template.
+        if let tpl = Templates.exportTemplate() {
+            var out = tpl
+            out = out.replacingOccurrences(of: "{{title}}", with: safeTitle)
+            out = out.replacingOccurrences(of: "{{style}}", with: exportCSS())
+            out = out.replacingOccurrences(of: "{{usercss}}", with: Templates.userCSS())
+            out = out.replacingOccurrences(of: "{{date}}", with:
+                DateFormatter.localizedString(from: Date(), dateStyle: .long, timeStyle: .none))
+            out = out.replacingOccurrences(of: "{{body}}", with: body)
+            return out
+        }
+
         return """
         <!DOCTYPE html>
         <html lang="en">
@@ -2331,6 +2543,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>\(safeTitle)</title>
         <style>
+        \(exportCSS())
+        </style>
+        </head>
+        <body>
+        <main>
+        \(body)
+        </main>
+        </body>
+        </html>
+        """
+    }
+}
+
+/// The exported page's stylesheet, kept apart from the document that wraps it
+/// so a template can ask for it by name with {{style}} without the two having
+/// to agree on anything else.
+let kExportCSS = """
           :root { color-scheme: light dark; --ink:#1c1b19; --paper:#fbfaf7; --rule:#e2ded6; --muted:#6b6862; }
           @media (prefers-color-scheme: dark) {
             :root { --ink:#e8e6e1; --paper:#191817; --rule:#33312e; --muted:#9a968e; }
@@ -2353,17 +2582,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
           table { border-collapse: collapse; width: 100%; font-size: .95em; }
           th, td { border: 1px solid var(--rule); padding: 7px 10px; text-align: left; }
           th { background: rgba(127,127,127,.08); }
-        </style>
-        </head>
-        <body>
-        <main>
-        \(body)
-        </main>
-        </body>
-        </html>
-        """
-    }
+"""
 
+extension AppDelegate {
     func presentError(_ title: String, _ detail: String) {
         let alert = NSAlert()
         alert.messageText = title
@@ -2464,6 +2685,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         add(file, "Export as HTML…", action: #selector(menuExportHTML(_:)), target: self)
         add(file, "Export as PDF…", action: #selector(menuExportPDF(_:)), target: self)
         add(file, "Reveal in Finder", action: #selector(menuReveal(_:)), target: self)
+        file.addItem(.separator())
+        // Without this the feature does not exist. Nobody finds two optional
+        // files in a Library folder they were never told about, and a
+        // stylesheet hook nobody can find is the same as no stylesheet hook.
+        add(file, "Templates Folder…", action: #selector(menuTemplates(_:)), target: self)
         file.addItem(.separator())
         add(file, "Page Setup…", key: "p", mods: [.command, .shift],
             action: #selector(menuPageSetup(_:)), target: self)

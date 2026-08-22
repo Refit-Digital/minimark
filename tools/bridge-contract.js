@@ -147,6 +147,25 @@ report('every menu command name is in the command map',
   uniq(cmdSent).filter(n => !cmdMap.includes(n)),
   'menu items send these and the page does nothing with them:');
 
+/* ---- templates ----------------------------------------------------------
+   The export template is a third string-matched contract, and the one most
+   likely to rot quietly: the starter file the app writes into Application
+   Support tells people which {{placeholders}} exist, and htmlDocument is what
+   actually substitutes them. A placeholder documented but never substituted
+   is a live template that renders "{{date}}" into somebody's exported page. */
+const starter = (() => {
+  const at = swift.indexOf('let kStarterExportTemplate');
+  return at < 0 ? '' : swift.slice(at, swift.indexOf('"""', swift.indexOf('"""', at) + 3));
+})();
+const promised = all(starter, /\{\{(\w+)\}\}/g);
+const substituted = all(swift, /replacingOccurrences\(of:\s*"\{\{(\w+)\}\}"/g);
+report('every placeholder the starter template promises is substituted',
+  promised.filter(p => !substituted.includes(p)),
+  'the starter names these and htmlDocument leaves them in the page:');
+report('every placeholder the exporter substitutes is documented',
+  substituted.filter(p => !promised.includes(p)),
+  'htmlDocument fills these in and nothing tells anyone they exist:');
+
 /* Unused in the other direction is worth knowing about but is not a failure:
    the shell legitimately defines cases for messages an older page sent, and
    the page legitimately exposes functions for a shell that has not caught up. */

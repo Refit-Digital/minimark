@@ -591,6 +591,7 @@
       { title: 'Save', key: '⌘S', run: function () { send('menu', { name: 'save' }); } },
       { title: 'Save as…', key: '⇧⌘S', run: function () { send('menu', { name: 'saveAs' }); } },
       { title: 'Export as HTML…', run: function () { send('menu', { name: 'exportHTML' }); } },
+      { title: 'Templates folder…', run: function () { send('menu', { name: 'templates' }); } },
       { title: 'Export as PDF…', run: function () { send('menu', { name: 'exportPDF' }); } },
       { title: 'Print…', key: '⌘P', run: function () { send('menu', { name: 'print' }); } },
       { title: 'Page Setup…', key: '⇧⌘P', run: function () { send('menu', { name: 'pageSetup' }); } },
@@ -2005,6 +2006,25 @@
        if nothing has changed since the last write — so an app-switch on an
        untouched document costs nothing. */
     histCommit: function () { return MM.histCommit(); },
+    /* The writer's own stylesheet, from
+       ~/Library/Application Support/minimark/user.css. It goes in one <style>
+       at the very end of <head>, which is after styles.css and after the
+       theme block, so a plain selector of the same specificity wins and
+       nobody has to reach for !important to change a colour.
+
+       Replaced wholesale rather than appended: the shell re-sends this on
+       every activation, and appending would stack a copy per switch back
+       until the head was full of dead rules. */
+    setUserCSS: function (css) {
+        var node = document.getElementById('userCSS');
+        if (!css) { if (node) node.parentNode.removeChild(node); return; }
+        if (!node) {
+          node = document.createElement('style');
+          node.id = 'userCSS';
+          document.head.appendChild(node);
+        }
+        node.textContent = css;
+      },
     setPrefs: function (p) {
       p = p || {};
       if (p.themeAuto != null) theme.auto = p.themeAuto === '1';
