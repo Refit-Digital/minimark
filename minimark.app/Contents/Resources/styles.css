@@ -623,6 +623,45 @@ body[data-mode="live"] #divider { opacity: 0; transform: scaleY(.2); width: 0; }
   box-shadow: 0 0 0 1px var(--accent);
 }
 
+/* Style check. An underline rather than a highlight, and deliberately so: a
+   filled background on every "just" and "very" turns a page of prose into a
+   page of blocks and you stop reading it as writing. The line sits under the
+   words, the words keep the paper behind them.
+
+   Three hues, one per category, chosen to hold up on cream, white and dark
+   paper alike rather than being derived from --accent, which changes with the
+   theme and would make the categories mean different things in each one. A
+   user stylesheet can override all three in one place. */
+:root {
+  --sc-filler:     #6b8fb5;
+  --sc-cliche:     #bf8836;
+  --sc-redundancy: #c05f5f;
+}
+#doc mark.smark {
+  background: none; color: inherit;
+  text-decoration: underline;
+  text-decoration-style: wavy;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  text-decoration-skip-ink: none;
+  transition: background 200ms var(--ease-soft);
+}
+#doc mark.smark-filler     { text-decoration-color: var(--sc-filler); }
+#doc mark.smark-cliche     { text-decoration-color: var(--sc-cliche); }
+#doc mark.smark-redundancy { text-decoration-color: var(--sc-redundancy); }
+#doc mark.smark:hover {
+  background: color-mix(in srgb, currentColor 8%, transparent);
+  border-radius: 2px;
+}
+/* the one you have stepped to, same treatment find gives its current hit */
+#doc mark.smark.cur {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-radius: 2px; padding: 0 1px; margin: 0 -1px;
+}
+
+/* The count only exists while the check is on, and takes its width with it. */
+#stStyle[hidden] { display: none; }
+
 #hl .ln { transition: opacity 260ms var(--ease-soft); }
 body.focus #hl .ln { opacity: .22; }
 body.focus #hl .ln.cur { opacity: 1; }

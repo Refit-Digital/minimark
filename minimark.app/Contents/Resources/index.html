@@ -65,6 +65,12 @@
           <path d="M2.4 8.4h11.2M4.3 8.4V4.1h7.4v4.3M3.1 8.4l-.7 4.3h11.2l-.7-4.3"/><path d="M5.9 11h4.2"/>
         </svg>
       </button>
+      <button type="button" class="icon-btn sm" id="styleBtn" aria-label="Style check" title="Style check  ⌃⌥S">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M2.6 4.1h10.8M2.6 7.5h7.6"/>
+          <path d="M2.6 11.6c.9-1.1 1.8-1.1 2.7 0s1.8 1.1 2.7 0 1.8-1.1 2.7 0 1.8 1.1 2.7 0"/>
+        </svg>
+      </button>
 
       <div class="seg" id="seg" role="tablist" aria-label="Editing mode">
         <div class="seg-pill" id="segPill"></div>
@@ -87,6 +93,7 @@
 
     <div class="st-right">
       <span class="st" id="stSaved"></span>
+      <span class="st click" id="stStyle" hidden><b>0</b> notes</span>
       <span class="st click" id="stCount" title="Click to cycle"><b>0</b> words</span>
       <span class="st" id="stPos">Ln 1</span>
       <button type="button" class="icon-btn sm" id="helpBtn" aria-label="Markdown syntax help" title="Markdown reference  ⌘/">
@@ -190,6 +197,7 @@
       <span>Link<kbd>⌘⇧K</kbd></span>
       <span>Inline code<kbd>⌘E</kbd></span>
       <span>Focus mode<kbd>⌘⇧D</kbd></span>
+      <span>Style check<kbd>⌃⌥S</kbd></span>
       <span>Text size<kbd>⌘+ / ⌘-</kbd></span>
     </div>
   </aside>
@@ -198,6 +206,7 @@
 
   <script src="vendor/marked.min.js"></script>
   <script src="vendor/turndown.js"></script>
+  <script src="style-check.js"></script>
   <script src="app.js"></script>
   <script src="ui.js"></script>
 </body>

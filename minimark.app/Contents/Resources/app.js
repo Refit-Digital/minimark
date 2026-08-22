@@ -21,7 +21,7 @@ window.MM = (function () {
   var state = {
     text: '', blocks: [''], mode: 'split',
     editing: null, dirty: false,
-    zen: false, focus: false, typewriter: false,
+    zen: false, focus: false, typewriter: false, styleCheck: false,
     countIdx: 0, savedAt: null, fileName: 'Untitled.md', docDir: '',
     /* Which of the shell's tabs is on screen. 0 until the shell says
        otherwise, which is also what an untabbed shell would leave it at, so

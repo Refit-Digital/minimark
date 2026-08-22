@@ -401,6 +401,153 @@
   }
 
   /* ============================================================
+     STYLE CHECK
+     ============================================================
+     Marks fillers, clichés and redundancies in the rendered document. The
+     dictionary and the matcher are in style-check.js, on purpose: that file
+     is the one people will want to argue with, and arguing with it should not
+     mean reading this one.
+
+     It marks the *rendered* text rather than the source, because the source
+     is full of markdown and a phrase split by a `**` is not a phrase the
+     matcher can see. It follows that in split view the marks appear in the
+     preview beside what you are typing, which is where your eye already goes
+     to check yourself. The block being written in is a textarea and gets no
+     marks at all, which is right: highlights that move under the caret while
+     you type are worse than no highlights. */
+  var styleBtn = $('#styleBtn'), stStyle = $('#stStyle');
+  var styleMarks = [], styleAt = -1, styleTimer = null;
+  var styleCounts = { filler: 0, cliche: 0, redundancy: 0 };
+
+  /* No more than this many in one document. A pathological file — a word
+     list, a thesaurus, somebody's notes on filler words — should slow the
+     editor down not at all, and the two-thousandth mark tells the writer
+     nothing the first fifty did not. */
+  var STYLE_CAP = 2000;
+
+  function clearStyle() {
+    if (!styleMarks.length) return;
+    var parents = [];
+    for (var i = 0; i < styleMarks.length; i++) {
+      var m = styleMarks[i], p = m.parentNode;
+      if (!p) continue;                       /* the block was re-rendered under us */
+      p.replaceChild(document.createTextNode(m.textContent), m);
+      if (parents.indexOf(p) === -1) parents.push(p);
+    }
+    for (var j = 0; j < parents.length; j++) parents[j].normalize();
+    styleMarks = []; styleAt = -1;
+  }
+
+  /* Prose only. "just" inside a code sample is a variable name and "very" in
+     a maths block is not a word at all. Nothing inside an existing <mark>
+     either, so these and the find highlights cannot nest inside each other
+     and leave the other's cleanup with orphaned nodes to normalize. */
+  function styleTextNodes() {
+    var walker = document.createTreeWalker(el.doc, NodeFilter.SHOW_TEXT, {
+      acceptNode: function (n) {
+        if (!n.nodeValue || !n.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
+        var p = n.parentNode;
+        while (p && p !== el.doc) {
+          var tag = p.nodeName;
+          if (tag === 'TEXTAREA' || tag === 'SCRIPT' || tag === 'STYLE' ||
+              tag === 'CODE' || tag === 'PRE' || tag === 'MARK')
+            return NodeFilter.FILTER_REJECT;
+          if (p.classList && (p.classList.contains('katex') || p.classList.contains('katex-display')))
+            return NodeFilter.FILTER_REJECT;
+          p = p.parentNode;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    var out = [], n;
+    while ((n = walker.nextNode())) out.push(n);
+    return out;
+  }
+
+  function paintStyle() {
+    clearStyle();
+    styleCounts = { filler: 0, cliche: 0, redundancy: 0 };
+    if (!state.styleCheck || !window.MMStyle) { updateStyleCount(); return; }
+    /* collect first, then replace: the walker is live and rewriting a node
+       while it is standing on it is how you skip half the document */
+    var nodes = styleTextNodes();
+    for (var i = 0; i < nodes.length && styleMarks.length < STYLE_CAP; i++) {
+      var node = nodes[i], v = node.nodeValue;
+      var hits = MMStyle.scan(v);
+      if (!hits.length || !node.parentNode) continue;
+      var frag = document.createDocumentFragment(), at = 0;
+      for (var k = 0; k < hits.length && styleMarks.length < STYLE_CAP; k++) {
+        var h = hits[k];
+        if (h.at > at) frag.appendChild(document.createTextNode(v.slice(at, h.at)));
+        var mk = document.createElement('mark');
+        mk.className = 'smark smark-' + h.kind;
+        mk.title = h.why ? h.label + ': ' + h.why : h.label;
+        mk.appendChild(document.createTextNode(v.slice(h.at, h.at + h.len)));
+        frag.appendChild(mk);
+        styleMarks.push(mk);
+        styleCounts[h.kind]++;
+        at = h.at + h.len;
+      }
+      if (at < v.length) frag.appendChild(document.createTextNode(v.slice(at)));
+      node.parentNode.replaceChild(frag, node);
+    }
+    updateStyleCount();
+  }
+
+  /* Repainting is debounced separately from rendering. renderDoc already runs
+     on a 90ms debounce while somebody is typing, and walking every text node
+     in the document that often is exactly the kind of full-document work per
+     keystroke this editor is trying not to do. */
+  function scheduleStyle() {
+    if (styleTimer) clearTimeout(styleTimer);
+    if (!state.styleCheck) { clearStyle(); updateStyleCount(); return; }
+    styleTimer = setTimeout(function () { styleTimer = null; paintStyle(); }, 220);
+  }
+
+  function styleTotal() {
+    return styleCounts.filler + styleCounts.cliche + styleCounts.redundancy;
+  }
+
+  function updateStyleCount() {
+    if (!stStyle) return;
+    stStyle.hidden = !state.styleCheck;
+    if (!state.styleCheck) return;
+    var n = styleTotal();
+    stStyle.innerHTML = '<b>' + n + '</b> ' + (n === 1 ? 'note' : 'notes');
+    stStyle.title = n
+      ? styleCounts.filler + ' filler  ·  ' + styleCounts.cliche + ' cliché  ·  ' +
+        styleCounts.redundancy + ' redundancy  ·  click to step through'
+      : 'Nothing flagged';
+  }
+
+  /* Step to the next mark and put it in the middle of the pane. The document
+     can be repainted between two clicks — the writer fixed one — so the index
+     is bounded on the way in rather than trusted. */
+  function styleStep() {
+    if (!styleMarks.length) return;
+    if (styleAt >= 0 && styleMarks[styleAt]) styleMarks[styleAt].classList.remove('cur');
+    styleAt = (styleAt + 1) % styleMarks.length;
+    var mk = styleMarks[styleAt];
+    mk.classList.add('cur');
+    mk.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
+
+  function setStyleCheck(on, silent) {
+    state.styleCheck = !!on;
+    if (styleBtn) styleBtn.classList.toggle('on', state.styleCheck);
+    paintStyle();
+    if (silent) return;
+    send('pref', { key: 'styleCheck', value: state.styleCheck ? '1' : '0' });
+    if (!state.styleCheck) { toast('Style check off'); return; }
+    var n = styleTotal();
+    toast(n ? 'Style check  ·  ' + n + (n === 1 ? ' note' : ' notes')
+            : 'Style check  ·  nothing flagged');
+  }
+
+  if (styleBtn) styleBtn.addEventListener('click', function () { setStyleCheck(!state.styleCheck); });
+  if (stStyle) stStyle.addEventListener('click', styleStep);
+
+  /* ============================================================
      HEADING SCRUBBER
      ============================================================ */
   var scrub = $('#scrub'), scrubLabel = $('#scrubLabel');
@@ -458,7 +605,10 @@
     setTimeout(function () { el.body.classList.remove('scrubbing'); }, 900);
   }
 
-  MM.onDocRendered = buildScrub;
+  /* Two things want to know the document was rebuilt. Assigning the hook
+     twice would silently leave one of them out, which is exactly the sort of
+     thing that is found six weeks later. */
+  MM.onDocRendered = function () { buildScrub(); scheduleStyle(); };
   MM.onPreviewScroll = function () {
     var ticks = scrub.querySelectorAll('.tick');
     if (!ticks.length) return;
@@ -1715,6 +1865,7 @@
       return;
     }
     if (e.ctrlKey && e.altKey && e.code === 'KeyZ') { e.preventDefault(); setZen(!state.zen); return; }
+    if (e.ctrlKey && e.altKey && e.code === 'KeyS') { e.preventDefault(); setStyleCheck(!state.styleCheck); return; }
     if (!meta) return;
 
     var k = e.key.toLowerCase();
@@ -2050,6 +2201,7 @@
       if (p.zen === '1') setZenSilent(true);
       if (p.focus === '1') { state.focus = true; el.body.classList.add('focus'); }
       if (p.typewriter === '1') { state.typewriter = true; twBtn.classList.add('on'); }
+      if (p.styleCheck === '1') setStyleCheck(true, true);
       if (p.mode && p.mode !== state.mode) MM.setMode(p.mode, { animate: false });
       applyTheme(); MM.movePill(false);
       if (p.scroll) {
@@ -2069,6 +2221,7 @@
         zen: function () { setZen(!state.zen); },
         focus: function () { setFocus(!state.focus); },
         typewriter: function () { setTypewriter(!state.typewriter); },
+        styleCheck: function () { setStyleCheck(!state.styleCheck); },
         themes: function () { themePop.classList.toggle('open'); },
         palette: openPalette,
         headings: openHeadings,

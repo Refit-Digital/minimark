@@ -2757,6 +2757,10 @@ extension AppDelegate {
         add(view, "Zen", key: "z", mods: [.control, .option], command: "zen")
         add(view, "Focus", key: "d", mods: [.command, .shift], command: "focus")
         add(view, "Typewriter", key: "t", mods: [.command, .shift], command: "typewriter")
+        // ⌃⌥S rather than anything with ⌘⇧ in it: ⇧⌘S is Save As, and the
+        // other view toggles that are not about the document itself already
+        // live under ⌃⌥ — Zen is ⌃⌥Z and keeping tabs showing is ⌃⌥T.
+        add(view, "Style Check", key: "s", mods: [.control, .option], command: "styleCheck")
         view.addItem(.separator())
         add(view, "Bigger Text", key: "+", command: "bigger")
         add(view, "Smaller Text", key: "-", command: "smaller")
