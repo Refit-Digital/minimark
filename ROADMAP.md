@@ -365,6 +365,27 @@ scope on purpose — a Library, iCloud and Dropbox sync, publishing to Ghost and
 WordPress, mobile, ten localisations, Authorship. Each is months. Three were
 cheap enough to be worth it, and all three are in.
 
+- **Focus levels.** Focus mode now lights either the paragraph or the
+  sentence. ⌃⌥D cycles them, and both are in the View menu and the palette.
+
+  Sentence focus works the only way it can: you cannot dim part of a textarea,
+  so wherever the caret is, the text under it is drawn by a second layer where
+  each sentence is its own element, with the textarea transparent on top
+  keeping nothing but the caret. That is the same trick #hl and #src already
+  use for the source pane, applied twice more — to the open block in live view
+  and to the caret's line in split view. Where there is no caret in the text
+  at all, sentence focus falls back to the paragraph rather than inventing one.
+
+  The splitter is in app.js and knows about abbreviations, initials, decimals
+  and closing quotes. It will never be right about every sentence in English;
+  the cost of a wrong split is one clause dimmed that should not be, which the
+  next keystroke corrects.
+
+  Two bugs were fixed on the way, and both had been there since focus mode
+  landed: it did nothing at all in live view, because staggerBlocks pinned
+  every block's opacity with a filled Web Animation, and with no block open it
+  lit the last paragraph in the file rather than the one you were in.
+
 - **Style check.** Fillers, clichés and redundancies, underlined in the
   rendered document, with the reason on hover and a count in the status bar
   that steps through them. `style-check.js` is the dictionary and the matcher,
@@ -396,8 +417,14 @@ Left rather than guessed at: a missing wikilink target looks the same as one
 that exists, because telling them apart means the shell answering a round trip
 for every link on screen. And style check is English only.
 
-The suite is 153 assertions across six tools now, all of it runnable with one
-`npm test` in `tools/`.
+The suite is 205 assertions across eight tools now, all of it runnable with
+one `npm test` in `tools/`.
+
+One small thing noticed and left alone: `autosize` sets a block's height from
+its scrollHeight after setting height to `auto`, and a textarea at `auto` is
+two rows tall whatever is in it. So an open block holding one line is a line
+taller than its text. Cosmetic, and changing block heights would move the
+scroll-sync anchors, so it wants its own look rather than a drive-by fix.
 
 ---
 

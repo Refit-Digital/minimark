@@ -386,8 +386,32 @@
   function setFocus(on) {
     state.focus = on;
     el.body.classList.toggle('focus', on);
-    MM.markCurrentLine(); MM.markCurrentBlock();
-    toast(on ? 'Focus mode' : 'Focus off');
+    applyFocusLevel();
+    toast(on ? 'Focus mode  ·  ' + state.focusLevel : 'Focus off');
+  }
+
+  /* Paragraph or sentence. The class carries it rather than the JS, because
+     what it changes is which of two drawing layers is in force, and both are
+     CSS. Repainting after is not optional: the sentence spans and the block
+     mirror are only built while the level calls for them, so switching level
+     has to build or tear down whichever one just changed hands. */
+  function applyFocusLevel() {
+    el.body.classList.toggle('focus-sentence', state.focus && state.focusLevel === 'sentence');
+    MM.markCurrentLine();
+    MM.markCurrentBlock();
+    MM.paintBlockSentences();
+    MM.paintLineSentences();
+  }
+
+  function setFocusLevel(level, silent) {
+    state.focusLevel = level === 'sentence' ? 'sentence' : 'paragraph';
+    applyFocusLevel();
+    if (silent) return;
+    send('pref', { key: 'focusLevel', value: state.focusLevel });
+    /* Choosing a level is choosing to be in focus mode. Setting it and seeing
+       nothing happen because focus was off would read as the setting failing. */
+    if (!state.focus) { setFocus(true); return; }
+    toast(state.focusLevel === 'sentence' ? 'Focus: sentence' : 'Focus: paragraph');
   }
 
   var twBtn = $('#twBtn');
@@ -725,6 +749,8 @@
       { title: 'Rename this file…', run: startRename },
       { title: 'Toggle Full Screen', key: '⌃⌘F', run: function () { send('menu', { name: 'fullscreen' }); } },
       { title: 'Toggle Focus mode', key: '⌘⇧D', run: function () { setFocus(!state.focus); } },
+      { title: 'Focus: sentence', hint: 'light only the sentence you are in', run: function () { setFocusLevel('sentence'); } },
+      { title: 'Focus: paragraph', hint: 'light the whole paragraph', run: function () { setFocusLevel('paragraph'); } },
       { title: 'Toggle Typewriter scrolling', key: '⌘⇧T', run: function () { setTypewriter(!state.typewriter); } },
       { title: 'Version history…', key: '⌘⇧H', hint: 'restore an earlier state', run: openHistory },
       { title: 'Bigger text', key: '⌘+', run: function () { stepSize(1); } },
@@ -1866,6 +1892,11 @@
     }
     if (e.ctrlKey && e.altKey && e.code === 'KeyZ') { e.preventDefault(); setZen(!state.zen); return; }
     if (e.ctrlKey && e.altKey && e.code === 'KeyS') { e.preventDefault(); setStyleCheck(!state.styleCheck); return; }
+    if (e.ctrlKey && e.altKey && e.code === 'KeyD') {
+      e.preventDefault();
+      setFocusLevel(state.focusLevel === 'sentence' ? 'paragraph' : 'sentence');
+      return;
+    }
     if (!meta) return;
 
     var k = e.key.toLowerCase();
@@ -2213,7 +2244,9 @@
          its own entry point, App.setHistory */
       if (p.tabsPin === '1') setTabsPinned(true, true);
       if (p.zen === '1') setZenSilent(true);
+      if (p.focusLevel) state.focusLevel = p.focusLevel === 'sentence' ? 'sentence' : 'paragraph';
       if (p.focus === '1') { state.focus = true; el.body.classList.add('focus'); }
+      applyFocusLevel();
       if (p.typewriter === '1') { state.typewriter = true; twBtn.classList.add('on'); }
       if (p.styleCheck === '1') setStyleCheck(true, true);
       if (p.mode && p.mode !== state.mode) MM.setMode(p.mode, { animate: false });
@@ -2234,6 +2267,8 @@
         live: function () { MM.setMode('live'); },
         zen: function () { setZen(!state.zen); },
         focus: function () { setFocus(!state.focus); },
+        focusParagraph: function () { setFocusLevel('paragraph'); },
+        focusSentence: function () { setFocusLevel('sentence'); },
         typewriter: function () { setTypewriter(!state.typewriter); },
         styleCheck: function () { setStyleCheck(!state.styleCheck); },
         themes: function () { themePop.classList.toggle('open'); },

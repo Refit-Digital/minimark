@@ -843,6 +843,44 @@ body[data-mode="live"] #doc .blk.editing:hover { background: transparent; }
 }
 @keyframes blkIn { from { opacity: 0; transform: translateY(-3px) scale(.995); } to { opacity: 1; transform: none; } }
 
+/* Sentence focus, live view. You cannot dim part of a textarea, so the block's
+   text is drawn twice: once here, where sentences are separate elements and
+   can be dimmed one by one, and once in the textarea on top of it with its
+   text made transparent. Only the caret and the selection still come from the
+   textarea, which is the whole point — it is still a real field.
+
+   Every metric below is copied from .blk-edit deliberately rather than
+   inherited. The two layers have to lay out identically to the pixel, and a
+   value that only lives in one of them is a value that will drift out of the
+   other. */
+.blk-hl {
+  /* left, top and width are set from the textarea every time this is
+     painted — see paintBlockSentences. Declaring them here as well would be a
+     second copy of the same number. */
+  position: absolute;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  font-family: var(--mono); font-size: 13.4px; line-height: 1.72;
+  letter-spacing: 0; tab-size: 4;
+  color: var(--ink-soft);
+  background: var(--code-bg); border-radius: 7px;
+  box-shadow: 0 0 0 1px var(--rule);
+  white-space: pre-wrap; word-wrap: break-word; overflow-wrap: break-word;
+  pointer-events: none;
+}
+/* The textarea keeps the caret and gives up everything else. */
+body.focus-sentence #doc .blk.editing .blk-edit {
+  color: transparent; background: transparent; box-shadow: none;
+}
+.blk-hl .sn { opacity: .26; transition: opacity 220ms var(--ease-soft); }
+.blk-hl .sn.cur { opacity: 1; }
+
+/* Sentence focus, split view. Same idea, but the layer that draws the text is
+   #hl, which is already there for the syntax tint, so the spans go straight
+   into the line the caret is on. */
+body.focus.focus-sentence #hl .ln.cur .sn { opacity: .3; transition: opacity 220ms var(--ease-soft); }
+body.focus.focus-sentence #hl .ln.cur .sn.cur { opacity: 1; }
+
 /* transition sweep */
 #sweep {
   position: absolute; inset: 0; pointer-events: none; opacity: 0; z-index: 5;

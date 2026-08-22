@@ -22,6 +22,8 @@ window.MM = (function () {
     text: '', blocks: [''], mode: 'split',
     editing: null, dirty: false,
     zen: false, focus: false, typewriter: false, styleCheck: false,
+    /* 'paragraph' lights the block you are in, 'sentence' the sentence. */
+    focusLevel: 'paragraph',
     /* The block the caret was last in. Live view has no other way to answer
        that once the block has been committed and is rendered HTML again. */
     lastBlock: 0,
@@ -985,6 +987,7 @@ window.MM = (function () {
     if (!state.focus && !state.typewriter) return;
     var n = currentLineIndex(), kids = el.hl.children;
     for (var i = 0; i < kids.length; i++) kids[i].classList.toggle('cur', i === n);
+    paintLineSentences();
   }
   /* Which block focus mode should keep lit when no block is open. In split
      view the source textarea holds the real caret and answers this properly.
@@ -1001,6 +1004,173 @@ window.MM = (function () {
     i = Math.max(0, Math.min(state.blocks.length - 1, i == null ? 0 : i));
     var kids = el.doc.children;
     for (var k = 0; k < kids.length; k++) kids[k].classList.toggle('cur', k === i);
+  }
+
+  /* ---------------- sentences ----------------
+     Focus mode can light the sentence rather than the paragraph, which means
+     the editor has to know where a sentence ends. There is no correct answer
+     to that in general, so this aims to be wrong rarely and never
+     catastrophically: the cost of a bad split is one clause dimmed that
+     should not have been, which the next keystroke corrects.
+
+     A terminator ends a sentence when whitespace or the end of the text
+     follows it, closing quotes and brackets excepted, and when what precedes
+     it is not something that routinely carries a full stop of its own. */
+  var ABBREV = /(?:^|[\s(\[])(?:mr|mrs|ms|dr|prof|rev|sr|jr|st|vs|etc|approx|fig|no|vol|pp|al|inc|ltd|co|dept|est|max|min|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec|e\.g|i\.e)\.$/i;
+  var CLOSERS = '”’")]»';
+
+  function sentences(text) {
+    text = String(text == null ? '' : text);
+    var out = [], start = 0, i = 0, n = text.length;
+    while (i < n) {
+      var c = text[i];
+      if (c !== '.' && c !== '!' && c !== '?') { i++; continue; }
+      var j = i;
+      while (j + 1 < n && '.!?'.indexOf(text[j + 1]) > -1) j++;   /* "?!", "..." */
+      var k = j + 1;
+      while (k < n && CLOSERS.indexOf(text[k]) > -1) k++;         /* he said "no." */
+      var ends = k >= n || /\s/.test(text[k]);
+      if (ends && c === '.') {
+        var lead = text.slice(0, i + 1);
+        /* Dr. Foster, e.g. this, and J. R. Hartley — all of which carry a
+           full stop that is not the end of anything. */
+        if (ABBREV.test(lead.slice(-14))) ends = false;
+        else if (/(?:^|[\s(\[])[A-Za-z]\.$/.test(lead.slice(-3))) ends = false;
+      }
+      if (!ends) { i = k; continue; }
+      var e = k;
+      while (e < n && /[ \t]/.test(text[e])) e++;   /* the space after belongs to what it follows */
+      out.push([start, e]);
+      start = e; i = e;
+    }
+    if (start < n) out.push([start, n]);
+    return out.length ? out : [[0, n]];
+  }
+
+  /* Which of those the caret is in. A caret sitting exactly on a boundary
+     belongs to the sentence it is about to type into, not the one it just
+     finished, which is what makes typing past a full stop move the light on
+     rather than leaving it behind. */
+  function sentenceAt(ranges, pos) {
+    for (var i = 0; i < ranges.length; i++) {
+      if (pos < ranges[i][1]) return i;
+    }
+    return ranges.length - 1;
+  }
+
+  /* Wrap character ranges of a subtree's text in spans, leaving whatever
+     markup is already in there alone — the tinted source line has spans of
+     its own and this must not disturb them. Text nodes are collected before
+     any splitting starts, because splitting one invalidates a live walker. */
+  function wrapRanges(root, ranges, cur) {
+    var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+    var nodes = [], n;
+    while ((n = walker.nextNode())) nodes.push(n);
+    var made = [], at = 0;
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i], len = node.nodeValue.length, from = at;
+      at += len;
+      if (!len) continue;
+      var frag = document.createDocumentFragment(), taken = 0, touched = false;
+      for (var r = 0; r < ranges.length; r++) {
+        var a = Math.max(ranges[r][0], from), b = Math.min(ranges[r][1], from + len);
+        if (b <= a) continue;
+        if (a - from > taken) frag.appendChild(document.createTextNode(node.nodeValue.slice(taken, a - from)));
+        var span = document.createElement('span');
+        span.className = 'sn' + (r === cur ? ' cur' : '');
+        span.appendChild(document.createTextNode(node.nodeValue.slice(a - from, b - from)));
+        frag.appendChild(span);
+        made.push(span);
+        taken = b - from;
+        touched = true;
+      }
+      if (!touched) continue;
+      if (taken < len) frag.appendChild(document.createTextNode(node.nodeValue.slice(taken)));
+      node.parentNode.replaceChild(frag, node);
+    }
+    return made;
+  }
+
+  function unwrapAll(spans) {
+    var parents = [];
+    for (var i = 0; i < spans.length; i++) {
+      var s = spans[i], p = s.parentNode;
+      if (!p) continue;
+      p.replaceChild(document.createTextNode(s.textContent), s);
+      if (parents.indexOf(p) === -1) parents.push(p);
+    }
+    for (var j = 0; j < parents.length; j++) parents[j].normalize();
+  }
+
+  function focusSentence() { return state.focus && state.focusLevel === 'sentence'; }
+
+  /* ---------------- sentence focus, the two places it can happen ----------
+     Both come down to the same constraint: to dim text you have to dim the
+     element that draws it, and you cannot dim part of a textarea. So wherever
+     the caret is, the text under it is drawn by something else and the
+     textarea is made transparent over the top — which is exactly the trick
+     #hl and #src already use for the source pane, applied twice more.
+
+     Where there is no caret in the text at all — live view with no block open
+     — sentence focus falls back to lighting the paragraph. No caret, no
+     sentence, and inventing one would light a sentence the writer is not in. */
+
+  /* Live view: a mirror of the open block's textarea, behind it. */
+  function paintBlockSentences() {
+    var ed = state.editing;
+    if (!ed || !ed.node) return;
+    var hl = ed.node.querySelector('.blk-hl');
+    if (!focusSentence() || state.mode !== 'live') {
+      if (hl && hl.parentNode) hl.parentNode.removeChild(hl);
+      return;
+    }
+    if (!hl) {
+      hl = document.createElement('div');
+      hl.className = 'blk-hl';
+      hl.setAttribute('aria-hidden', 'true');
+      ed.node.insertBefore(hl, ed.ta);
+    }
+    var v = ed.ta.value;
+    var rs = sentences(v), at = sentenceAt(rs, ed.ta.selectionStart || 0);
+    var out = '';
+    for (var i = 0; i < rs.length; i++) {
+      out += '<span class="sn' + (i === at ? ' cur' : '') + '">' +
+             esc(v.slice(rs[i][0], rs[i][1])) + '</span>';
+    }
+    /* pre-wrap gives a trailing newline no line box of its own, but a textarea
+       shows the empty line it makes. One more newline puts it back. */
+    hl.innerHTML = out + (v.slice(-1) === '\n' ? '\n' : '');
+
+    /* Measured off the textarea rather than declared in CSS. The block has a
+       negative-margin bleed for its hover background, so `left: 0` inside it
+       lands on the padding box and not on the field — and even if that were
+       corrected once, it would be a second place holding the same number,
+       waiting to disagree with the first. */
+    hl.style.left = ed.ta.offsetLeft + 'px';
+    hl.style.top = ed.ta.offsetTop + 'px';
+    hl.style.width = ed.ta.offsetWidth + 'px';
+    /* min-height rather than height, and it is not the same thing. autosize
+       sets the field's height from its scrollHeight after setting height to
+       'auto', and a textarea at 'auto' is two rows tall regardless of what is
+       in it — so an open block holding one line is a line taller than its
+       text. The mirror has to fill the same box or the background behind the
+       last line goes missing. min-height matches it without ever being able
+       to clip, which a fixed height could if the two ever disagreed. */
+    hl.style.minHeight = ed.ta.offsetHeight + 'px';
+  }
+
+  /* Split view: inside the tinted line the caret is on. */
+  var lineSpans = [];
+  function paintLineSentences() {
+    if (lineSpans.length) { unwrapAll(lineSpans); lineSpans = []; }
+    if (!focusSentence() || state.mode !== 'split') return;
+    var line = el.hl.querySelector('.ln.cur');
+    if (!line) return;
+    var rs = sentences(line.textContent);
+    if (rs.length < 2) return;              /* one sentence is the whole line */
+    var caret = el.src.selectionStart || 0;
+    var lineStart = el.src.value.lastIndexOf('\n', Math.max(0, caret - 1)) + 1;
+    lineSpans = wrapRanges(line, rs, sentenceAt(rs, caret - lineStart));
   }
 
   function mapRenderedToSource(src, target) {
@@ -1117,6 +1287,7 @@ window.MM = (function () {
     ta.addEventListener('beforeinput', undoBeforeInput);
     ta.addEventListener('input', function () {
       autosize(ta); markDirty(true);
+      paintBlockSentences();
       if (state.typewriter) typewriterLive();
     });
     ta.addEventListener('blur', function () {
@@ -1125,12 +1296,18 @@ window.MM = (function () {
     ta.addEventListener('keydown', liveKeydown);
     ta.addEventListener('click', undoBreak);
     ta.addEventListener('paste', onPaste);
+    /* keyup rather than keydown: the caret has not moved yet when the key
+       goes down, so a mirror painted then is one keystroke behind. */
+    ta.addEventListener('keyup', paintBlockSentences);
+    ta.addEventListener('click', paintBlockSentences);
+    ta.addEventListener('select', paintBlockSentences);
 
     ta.focus();
     var p = caret == null ? src.length : Math.max(0, Math.min(src.length, caret));
     ta.setSelectionRange(p, p);
     if (scrollIntoView) node.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     markCurrentBlock();
+    paintBlockSentences();
     updateCaretStatus();
     undoBreak();
     if (state.typewriter) typewriterLive();
@@ -2884,6 +3061,8 @@ window.MM = (function () {
     staggerBlocks: staggerBlocks,
     updateStatus: updateStatus, updateCaretStatus: updateCaretStatus,
     markDirty: markDirty, markCurrentLine: markCurrentLine, markCurrentBlock: markCurrentBlock,
+    sentences: sentences, sentenceAt: sentenceAt,
+    paintBlockSentences: paintBlockSentences, paintLineSentences: paintLineSentences,
     wrapSelection: wrapSelection, insertLink: insertLink, copyRich: copyRich,
     setHeading: setHeading, toggleLinePrefix: toggleLinePrefix, selectionRect: selectionRect,
     insertEmptyBlockAt: insertEmptyBlockAt, textareaForInsert: textareaForInsert,

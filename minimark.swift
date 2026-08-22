@@ -90,7 +90,7 @@ let kImageExtensions = ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif",
 /// file — see HistoryStore. The key is left in kLegacyHistoryKey only so an
 /// existing install can be migrated off it once, on first launch.
 let kPrefKeys = ["theme", "themeAuto", "themeLight", "themeDark", "font", "size",
-                 "zen", "focus", "typewriter", "styleCheck", "mode", "scroll",
+                 "zen", "focus", "focusLevel", "typewriter", "styleCheck", "mode", "scroll",
                  "fmtUse", "tabsPin"]
 
 // ============================================================================
@@ -2973,6 +2973,11 @@ extension AppDelegate {
         view.addItem(.separator())
         add(view, "Zen", key: "z", mods: [.control, .option], command: "zen")
         add(view, "Focus", key: "d", mods: [.command, .shift], command: "focus")
+        // The level the focus lands on. ⌃⌥D cycles the two in the web layer;
+        // these are here so both are reachable by name rather than by guessing
+        // which way a toggle will go.
+        add(view, "Focus: Paragraph", command: "focusParagraph")
+        add(view, "Focus: Sentence", key: "d", mods: [.control, .option], command: "focusSentence")
         add(view, "Typewriter", key: "t", mods: [.command, .shift], command: "typewriter")
         // ⌃⌥S rather than anything with ⌘⇧ in it: ⇧⌘S is Save As, and the
         // other view toggles that are not about the document itself already
