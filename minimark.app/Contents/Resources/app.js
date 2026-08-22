@@ -22,6 +22,9 @@ window.MM = (function () {
     text: '', blocks: [''], mode: 'split',
     editing: null, dirty: false,
     zen: false, focus: false, typewriter: false, styleCheck: false,
+    /* The block the caret was last in. Live view has no other way to answer
+       that once the block has been committed and is rendered HTML again. */
+    lastBlock: 0,
     countIdx: 0, savedAt: null, fileName: 'Untitled.md', docDir: '',
     /* Which of the shell's tabs is on screen. 0 until the shell says
        otherwise, which is also what an untabbed shell would leave it at, so
@@ -891,6 +894,7 @@ window.MM = (function () {
 
   function setText(text, opts) {
     opts = opts || {};
+    state.lastBlock = 0;
     state.text = String(text == null ? '' : text);
     if (opts.fromSource !== true) el.src.value = state.text;
     paintSource();
@@ -982,9 +986,19 @@ window.MM = (function () {
     var n = currentLineIndex(), kids = el.hl.children;
     for (var i = 0; i < kids.length; i++) kids[i].classList.toggle('cur', i === n);
   }
+  /* Which block focus mode should keep lit when no block is open. In split
+     view the source textarea holds the real caret and answers this properly.
+     In live view it does not: el.src is off screen and its caret sits wherever
+     the last full assignment left it, which is the end of the document — so
+     closing a block used to throw the focus to the last paragraph in the file.
+     Live view remembers instead. */
   function markCurrentBlock() {
     if (!state.focus) return;
-    var i = state.editing ? state.editing.i : blockIndexForOffset(el.src.selectionStart || 0);
+    var i;
+    if (state.editing) i = state.editing.i;
+    else if (state.mode === 'live') i = state.lastBlock;
+    else i = blockIndexForOffset(el.src.selectionStart || 0);
+    i = Math.max(0, Math.min(state.blocks.length - 1, i == null ? 0 : i));
     var kids = el.doc.children;
     for (var k = 0; k < kids.length; k++) kids[k].classList.toggle('cur', k === i);
   }
@@ -1031,6 +1045,7 @@ window.MM = (function () {
     var parts = splitBlocks(value);
     var drop = value.trim() === '' && state.blocks.length > 1;
     lastDropped = drop ? i : -1;
+    state.lastBlock = drop && i > 0 ? i - 1 : i;
     /* Compare the document before and after rather than the block against
        its parts. joinBlocks normalises runs of blank lines, so a change
        that normalised away read as "unchanged" and never marked the file
@@ -1097,6 +1112,7 @@ window.MM = (function () {
     node.appendChild(ta);
     autosize(ta);
     state.editing = { node: node, ta: ta, i: i };
+    state.lastBlock = i;
 
     ta.addEventListener('beforeinput', undoBeforeInput);
     ta.addEventListener('input', function () {
@@ -1636,6 +1652,9 @@ window.MM = (function () {
       redo: redoStack.slice(),
       scrollSrc: el.srcScroll.scrollTop,
       scrollPrev: el.prevPane.scrollTop,
+      /* so focus mode lights the paragraph you left this tab in, rather than
+         the first one, when you come back to it */
+      lastBlock: state.lastBlock,
       sel: state.mode === 'split'
         ? { start: el.src.selectionStart || 0, end: el.src.selectionEnd || 0 }
         : null
@@ -1646,7 +1665,7 @@ window.MM = (function () {
     return {
       text: text || '', fileName: name || 'Untitled.md', docDir: dir || '',
       dirty: false, savedAt: null, undo: [], redo: [],
-      scrollSrc: 0, scrollPrev: 0, sel: null
+      scrollSrc: 0, scrollPrev: 0, sel: null, lastBlock: 0
     };
   }
 
@@ -1669,6 +1688,7 @@ window.MM = (function () {
     state.savedAt = s.savedAt || null;
 
     setText(s.text || '', { immediate: true, markDirty: false });
+    state.lastBlock = s.lastBlock || 0;
 
     /* Set, not marked. The shell already knows this tab's dirty state — it is
        what it just told us — so routing it back through markDirty would post
@@ -2094,11 +2114,19 @@ window.MM = (function () {
     if (!animate) requestAnimationFrame(function () { el.pill.style.transition = ''; });
   }
 
+  /* fill is 'backwards', not 'both', and the difference is the whole of focus
+     mode working. 'backwards' holds the from-state through the delay, which is
+     what stops a block flashing in before its turn. 'both' also holds the
+     to-state afterwards, for ever — and a filled animation sits above the
+     cascade, so every block came out of this pinned at opacity 1 and
+     `body.focus .blk { opacity: .26 }` could never apply to it again. Since
+     switching to live view is what runs this, focus mode did nothing at all
+     in live view until something happened to rebuild the blocks. */
   function staggerBlocks() {
     Array.prototype.slice.call(el.doc.children, 0, 26).forEach(function (b, i) {
       try {
         b.animate([{ opacity: 0, transform: 'translateY(9px)' }, { opacity: 1, transform: 'none' }],
-          { duration: 430, delay: Math.min(i * 24, 280), easing: 'cubic-bezier(.22,1,.36,1)', fill: 'both' });
+          { duration: 430, delay: Math.min(i * 24, 280), easing: 'cubic-bezier(.22,1,.36,1)', fill: 'backwards' });
       } catch (e) {}
     });
   }

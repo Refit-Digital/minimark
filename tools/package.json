@@ -4,14 +4,15 @@
   "private": true,
   "description": "Test and contract tools for minimark. Run `npm install` here, then `npm test`.",
   "scripts": {
-    "test": "node bridge-contract.js && node tabs-test.js && node live-edit-test.js && node style-check-test.js && node templates-test.js && node wikilink-test.js && node encoding-test.js",
+    "test": "node bridge-contract.js && node tabs-test.js && node live-edit-test.js && node style-check-test.js && node templates-test.js && node wikilink-test.js && node focus-test.js && node encoding-test.js",
     "contract": "node bridge-contract.js",
     "tabs": "node tabs-test.js",
     "live": "node live-edit-test.js",
     "style": "node style-check-test.js",
     "templates": "node templates-test.js",
     "wiki": "node wikilink-test.js",
-    "encoding": "node encoding-test.js"
+    "encoding": "node encoding-test.js",
+    "focus": "node focus-test.js"
   },
   "devDependencies": {
     "playwright": "^1.62.1"
