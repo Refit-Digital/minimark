@@ -107,7 +107,17 @@ const prefKeys = (() => {
    Menu items carry a command name as representedObject; the page looks it up
    in a map. A typo either way is a menu item that does nothing. */
 const cmdSent = all(swift, /command:\s*"([\w]+)"/g)
-  .concat(all(swift, /\bcommand\(\s*"([\w]+)"\s*\)/g));
+  .concat(all(swift, /\bcommand\(\s*"([\w]+)"\s*\)/g))
+  /* The right-click menu's formatting run is a table of tuples rather than a
+     sequence of add() calls, so the two patterns above walk straight past it.
+     Scoped to that function: the middle string of each row is the command. */
+  .concat((() => {
+    const at = swift.indexOf('func formattingMenuItems()');
+    if (at < 0) return [];
+    const end = swift.indexOf('\n    }', at);
+    const chunk = swift.slice(at, end < 0 ? swift.length : end);
+    return all(chunk, /\(\s*"[^"]*",\s*"([\w]+)",\s*"[^"]*"\s*\)/g);
+  })());
 const cmdMap = (() => {
   const at = js.indexOf('command: function (name) {');
   if (at < 0) return [];

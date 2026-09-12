@@ -55,33 +55,62 @@ const struct = (() => {
   }
 })();
 
+/* `static` is fine on a method and a compile error on a free function, and
+   these come out of the app as methods. `private` stays: it is legal at file
+   scope and it is part of what the app says about them. Nothing else changes. */
+const unstatic = (name) =>
+  extract(name).replace(/^(\s*)((?:private |fileprivate )?)static /m, '$1$2');
+
 const harness = `
 import Foundation
+${extract('let kCoordinationTimeout')}
+${extract('enum Coordinated')}
 ${struct}
+${extract('enum WriteOutcome')}
 ${extract('func looksBinary')}
-${extract('func readTextFile')}
+${extract('func decodeTextFile')}
+${unstatic('private static func carryXattrs')}
+${unstatic('private static func replaceContents')}
+${unstatic('static func writeToDisk')}
 
-// The write path, in the shape the app uses it: the file's own encoding
-// first, UTF-8 only when the text has outgrown it.
+/* The app's own write, asked the question this test asks: did the file keep
+   its encoding, or did the text outgrow it? Extracted rather than restated —
+   a second copy of the promotion rule would agree with the first exactly
+   until the day it mattered.
+   Asynchronous now, because coordination is: the app never blocks a thread
+   waiting for a file somebody else is holding, so neither does this. Main
+   keeps turning until the answer lands, exactly as the app's does. */
 func writeBack(_ text: String, to url: URL, want: String.Encoding) -> String {
-    if want != .utf8, (try? text.write(to: url, atomically: true, encoding: want)) != nil {
-        return "kept"
+    var answer = "?"
+    let sem = DispatchSemaphore(value: 0)
+    // .update, because every write this test makes is a save of a file it has
+    // just read. What that intent means, and why the disk cannot answer it, is
+    // coordination-test's business rather than this one's.
+    writeToDisk(text, to: url, encoding: want, intent: .update, presenter: nil) { outcome, _ in
+        switch outcome {
+        case .wrote(let promoted): answer = promoted ? "promoted" : "kept"
+        case .failed(let why):     answer = "failed\\t\\(why)"
+        case .vanished(let why):   answer = "vanished\\t\\(why)"
+        }
+        sem.signal()
     }
-    try? text.write(to: url, atomically: true, encoding: .utf8)
-    return "promoted"
+    while sem.wait(timeout: .now()) == .timedOut {
+        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.02))
+    }
+    return answer
 }
 
 let args = CommandLine.arguments
 let url = URL(fileURLWithPath: args[2])
 switch args[1] {
 case "read":
-    if let f = readTextFile(url) {
+    if let f = decodeTextFile(url) {
         print("ok\\t\\(f.label)\\t\\(f.text.count)")
     } else {
         print("refused")
     }
 case "roundtrip":
-    guard let f = readTextFile(url) else { print("refused"); exit(0) }
+    guard let f = decodeTextFile(url) else { print("refused"); exit(0) }
     let edited = args.count > 3 ? f.text + args[3] : f.text
     let how = writeBack(edited, to: url, want: f.encoding)
     print("\\(how)\\t\\(f.label)")
@@ -166,9 +195,16 @@ ok('and the result is valid UTF-8 with both the old text and the new',
    promotedBytes.toString('utf8').includes('🎉'),
    promotedBytes.toString('utf8'));
 
+/* "kept", not "promoted". The distinction is the whole point of the flag: it
+   is what decides whether the writer is told "Saved as UTF-8 — the new text
+   needed it", and a file that was UTF-8 all along has nothing to be told. The
+   copy of the write path this harness used to carry returned "promoted" here,
+   because it could not tell the two apart; the app always could. */
 const u8 = file('plain.md', Buffer.from('just words\n', 'utf8'));
 ok('a UTF-8 file stays UTF-8 and says nothing about it',
-   run('roundtrip', u8, ' more').split('\t')[0] === 'promoted');
+   run('roundtrip', u8, ' more').split('\t')[0] === 'kept');
+ok('and the new text is on disk',
+   fs.readFileSync(u8, 'utf8') === 'just words\n more');
 
 fs.rmSync(dir, { recursive: true, force: true });
 console.log(`\n${passed} passed, ${failed} failed`);

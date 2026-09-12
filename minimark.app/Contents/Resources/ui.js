@@ -53,6 +53,97 @@
     renderThemePop();
   }
 
+  /* ============================================================
+     THE REVEAL
+
+     A change of theme is a change of light, so it arrives the way light
+     does: a circle opening from wherever the hand was. The View
+     Transitions API holds the old frame as a still and leaves the new
+     one live underneath it; all this does is uncover the new one with a
+     growing clip-path. The path itself is a CSS animation in styles.css,
+     driven by three custom properties set here, rather than an
+     Element.animate() against ::view-transition-new(root) — WebKit's
+     support for animating a pseudo-element from script is younger than
+     its support for view transitions, and the keyframes cost nothing.
+
+     Three things are easy to get wrong:
+
+     - The circle has to reach the corner furthest from its origin, not
+       the nearest, or the last of the screen snaps rather than wipes.
+     - body and .tb-grip cross-fade their colours over 420ms on a theme
+       change. The new frame is live, not a still, so that fade would run
+       inside it and the circle would open onto the colour being left.
+       .vt-theme turns both off for the length of the transition.
+     - The shell's opening burst — prefs, then the system appearance —
+       lands after the first paint and can name a different theme than
+       the one already drawn. Nobody asked for that, so the reveal stays
+       disarmed until somebody has touched the app. A wipe is a reply to
+       something; there is nothing to reply to yet.
+     ============================================================ */
+  var REVEAL_MS = 620;
+
+  var revealArmed = false;
+  ['pointerdown', 'keydown', 'wheel'].forEach(function (t) {
+    document.addEventListener(t, function () { revealArmed = true; },
+                              { capture: true, once: true, passive: true });
+  });
+
+  var reduceMotion = null;
+  try { reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)'); } catch (e) {}
+
+  function revealOrigin(at) {
+    if (at && isFinite(at.x) && isFinite(at.y)) return at;
+    /* No pointer behind the change: the command palette, a menu item, the
+       system turning dark at dusk. The appearance button is where the
+       change would have come from, so it is where it comes from. */
+    var r = themeBtn && themeBtn.getBoundingClientRect();
+    if (r && r.width) return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+  }
+
+  function reveal(at) {
+    var root = el.html;
+    if (!document.startViewTransition || (reduceMotion && reduceMotion.matches)) {
+      applyTheme();
+      return;
+    }
+    var o = revealOrigin(at);
+    var w = window.innerWidth, h = window.innerHeight;
+    var far = Math.hypot(Math.max(o.x, w - o.x), Math.max(o.y, h - o.y));
+    root.style.setProperty('--reveal-x', o.x + 'px');
+    root.style.setProperty('--reveal-y', o.y + 'px');
+    root.style.setProperty('--reveal-r', Math.ceil(far) + 'px');
+    root.style.setProperty('--reveal-ms', REVEAL_MS + 'ms');
+    root.classList.add('vt-theme');
+    var settle = function () { root.classList.remove('vt-theme'); };
+    var vt;
+    /* A transition can refuse to start — another one already running, the
+       window not visible. The theme still has to change when it does. */
+    try { vt = document.startViewTransition(applyTheme); }
+    catch (e) { settle(); applyTheme(); return; }
+    vt.finished.then(settle, settle);
+  }
+
+  /* The resolved theme not moving is the common case on a system change
+     while a theme is pinned, and on picking the theme already in use. A
+     wipe onto an identical frame is invisible and still costs two
+     snapshots of the whole window. */
+  function swapTheme(at) {
+    if (resolvedTheme() === el.html.dataset.theme) { applyTheme(); return; }
+    reveal(at);
+  }
+
+  /* A pick arms the reveal itself as well as riding it: a theme chosen from
+     the native menu bar never touches the web view, so nothing else would. */
+  function revealTheme(at) { revealArmed = true; swapTheme(at); }
+  function revealThemeSystem() { if (revealArmed) swapTheme(null); else applyTheme(); }
+
+  /* the point a click happened at, or null for anything that was not one —
+     a keyboard activation reports 0,0, which is a real corner of the window */
+  function pointOf(e) {
+    return (e && e.detail && (e.clientX || e.clientY)) ? { x: e.clientX, y: e.clientY } : null;
+  }
+
   function applyFont() {
     var f = FONTS.find(function (x) { return x.id === theme.font; }) || FONTS[0];
     el.html.style.setProperty('--prose', f.stack);
@@ -82,21 +173,21 @@
     toast(f ? f.name : id);
   }
 
-  function pickTheme(id) {
+  function pickTheme(id, at) {
     var t = THEMES.find(function (x) { return x.id === id; });
     if (!t) return;
     theme.auto = false;
     theme.manual = id;
     if (t.kind === 'light') theme.light = id; else theme.dark = id;
     persistTheme();
-    applyTheme();
+    revealTheme(at);
     toast(t.name);
   }
 
-  function setAuto(on) {
+  function setAuto(on, at) {
     theme.auto = on;
     persistTheme();
-    applyTheme();
+    revealTheme(at);
     /* theme.manual comes straight from a stored preference, so it can name a
        theme that no longer exists. .find() then returns undefined and reading
        .name threw — after persistTheme and applyTheme had already run, leaving
@@ -206,9 +297,10 @@
     if (dot) { setSize(parseInt(dot.dataset.setsize, 10)); return; }
     var row = e.target.closest('.tp-row');
     if (!row) return;
-    if (row.dataset.auto) setAuto(!theme.auto);
+    var at = pointOf(e);
+    if (row.dataset.auto) setAuto(!theme.auto, at);
     else if (row.dataset.font) pickFont(row.dataset.font);
-    else pickTheme(row.dataset.theme);
+    else pickTheme(row.dataset.theme, at);
   });
 
   var themeBtn = $('#themeBtn');
@@ -228,7 +320,7 @@
   try {
     var mq = window.matchMedia('(prefers-color-scheme: dark)');
     theme.systemDark = mq.matches;
-    mq.addEventListener('change', function (e) { theme.systemDark = e.matches; applyTheme(); });
+    mq.addEventListener('change', function (e) { theme.systemDark = e.matches; revealThemeSystem(); });
   } catch (e) {}
 
   /* ============================================================
@@ -633,9 +725,23 @@
      twice would silently leave one of them out, which is exactly the sort of
      thing that is found six weeks later. */
   MM.onDocRendered = function () { buildScrub(); scheduleStyle(); };
+
+  /* Up while the page is moving, and back down a beat after it stops. That
+     beat is the whole feature: scrolling is when somebody is looking for where
+     they are in the document, and it is the one moment the outline can answer
+     without being asked. Longer than the fade so the ticks do not start
+     dimming while the scroll is still under the finger. */
+  var scrubLitT = null;
+  function litScrub() {
+    scrub.classList.add('lit');
+    clearTimeout(scrubLitT);
+    scrubLitT = setTimeout(function () { scrub.classList.remove('lit'); }, 900);
+  }
+
   MM.onPreviewScroll = function () {
     var ticks = scrub.querySelectorAll('.tick');
     if (!ticks.length) return;
+    litScrub();
     var top = el.prevPane.getBoundingClientRect().top + 60, best = 0;
     ticks.forEach(function (t, n) {
       var node = el.doc.children[parseInt(t.dataset.i, 10)];
@@ -2080,6 +2186,23 @@
       renderTabs();
       toast('Saved');
     },
+    /* The shell has counted enough consecutive autosave failures on this tab
+       to be sure the file has stopped being written, or has just written it
+       again and is taking that back. `why` is the system's own words, or null
+       to clear. The status bar says so rather than a sheet: an unprompted
+       write must not be able to take the keyboard away mid-sentence, which is
+       the whole reason the autosave path is silent in the first place. */
+    saveTrouble: function (id, why) {
+      var tid = (id == null) ? state.tabId : (id | 0);
+      if (tid !== state.tabId) {
+        var s = sessions[tid];
+        if (s) s.saveTrouble = why || null;
+        return;
+      }
+      state.saveTrouble = why || null;
+      MM.updateStatus();
+      if (why) toast('Not saving — ' + why);
+    },
     autoSaved: function (id) {
       var tid = (id == null) ? state.tabId : (id | 0);
       var at = byId(tid);
@@ -2160,16 +2283,26 @@
       if (!ta) ta = MM.textareaForInsert(at);
       if (!ta || !ta.isConnected) { toast('Could not place the image'); return; }
 
-      /* Blank-line separated: consecutive image links on one line run together
-         into a single paragraph, which is never what dropping four files means. */
-      var md = paths.map(function (p) { return '![](' + mdDestination(p) + ')'; }).join('\n\n');
+      /* An alt text placeholder rather than an empty one, and selected, so it
+         can be typed straight over — the same move insertLink makes with its
+         label. `![](file.png)` asks nothing of the writer and gets nothing,
+         and every exported page and every PDF then carries an unlabelled
+         image. Somebody who does not want alt text still only has to press
+         Delete once, which is a fair trade for the ones who do. */
+      var ALT = 'alt';
+      var md = paths.map(function (p) { return '![' + ALT + '](' + mdDestination(p) + ')'; }).join('\n\n');
       /* And separated from whatever is already there, or the image is pulled
          into the end of that paragraph as an inline run. */
       var before = ta.value.slice(0, ta.selectionStart);
-      if (before && !/\n\s*\n$/.test(before)) md = (/\n$/.test(before) ? '\n' : '\n\n') + md;
+      var lead = '';
+      if (before && !/\n\s*\n$/.test(before)) lead = /\n$/.test(before) ? '\n' : '\n\n';
+      md = lead + md;
 
       ta.focus();
-      MM.replaceRange(ta, ta.selectionStart, ta.selectionEnd, md);
+      /* The first one's alt. With several images only one can hold the caret,
+         and the first is the one the eye is already on. */
+      var altAt = ta.selectionStart + lead.length + 2;
+      MM.replaceRange(ta, ta.selectionStart, ta.selectionEnd, md, altAt, altAt + ALT.length);
       toast(paths.length > 1 ? paths.length + ' images added' : 'Image added');
     },
     /* Kept for the original single-image bridge contract. */
@@ -2177,7 +2310,14 @@
     /* Called just before something that will steal the focus, so the caret can
        be put back afterwards. */
     pinInsertPoint: function () { MM.pinInsertPoint(); },
-    setSystemTheme: function (t) { theme.systemDark = (t === 'dark'); applyTheme(); },
+    setSystemTheme: function (t) { theme.systemDark = (t === 'dark'); revealThemeSystem(); },
+    /* Which of the wikilinks in the document point at a file that is actually
+       there, as { name: true|false }. One answer per batch the page asked
+       about, not one per link and not one round trip per link. */
+    setWikiTargets: function (map) { MM.setWikiTargets(map); },
+    /* A wikilink has just created the file it named, so every cached answer
+       about this folder is one render out of date. */
+    forgetWikiTargets: function () { MM.forgetWikiTargets(); },
     /* The version history store, read back from its sidecar file at launch.
        Separate from setPrefs because it is a document store, not a setting:
        it is large, it arrives on its own schedule, and a failure to parse it
@@ -2291,6 +2431,7 @@
         bold: function () { MM.wrapSelection('**', '**', 'bold'); },
         italic: function () { MM.wrapSelection('*', '*', 'italic'); },
         code: function () { MM.wrapSelection('`', '`', 'code'); },
+        strike: function () { MM.wrapSelection('~~', '~~', 'text'); },
         link: MM.insertLink,
         copyRich: MM.copyRich,
         /* Tabs. Opening and closing belong to the shell — it owns the files
@@ -2348,7 +2489,7 @@
     '- **Split** puts raw markdown on the left, rendered on the right',
     '- **Live** is one surface. Click any paragraph to reveal its markdown',
     '',
-    'Switch with the control above, the label in the bottom bar, or `⌘⇧M`.',
+    'Switch with the Split / Live control in the bottom bar, or `⌘⇧M`.',
     '',
     '## Getting around',
     '',
@@ -2366,11 +2507,12 @@
     '',
     '## Writing',
     '',
-    'Click the **?** for the full syntax reference. Paste a web page and it',
-    'arrives as clean markdown. Paste an image and it is saved beside your file.',
+    'Click the **?** at the bottom right for the full syntax reference. Paste a web',
+    'page and it arrives as clean markdown. Paste an image and it is saved beside',
+    'your file.',
     '',
-    'Click the filename in the top left to rename it. The button beside the **?**',
-    'holds six themes and five typefaces.',
+    'Click the filename in the middle of the bottom bar to rename it. The gear at',
+    'the far left of that bar holds six themes and five typefaces.',
     '',
     '> Lists continue themselves on Enter. Tab nests them, and tidies a table',
     '> into aligned columns.',

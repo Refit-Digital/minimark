@@ -28,6 +28,10 @@ window.MM = (function () {
        that once the block has been committed and is rendered HTML again. */
     lastBlock: 0,
     countIdx: 0, savedAt: null, fileName: 'Untitled.md', docDir: '',
+    /* Why the autosave has stopped working, once the shell has counted enough
+       consecutive failures to be sure it is not a passing sync client. Null
+       whenever the file is being written, which is nearly always. */
+    saveTrouble: null,
     /* Which of the shell's tabs is on screen. 0 until the shell says
        otherwise, which is also what an untabbed shell would leave it at, so
        every message carrying it stays meaningful either way. */
@@ -361,6 +365,76 @@ window.MM = (function () {
       }
     }]
   });
+
+  /* ---------------- which wikilinks point at something ----------------
+
+     A link to a note that exists and a link to one that does not used to look
+     identical, so the only way to find a typo in a filename was to click every
+     link in the document. The page cannot answer this itself: it knows a name,
+     and the folder belongs to the shell.
+
+     One round trip per render, not one per link. Every unresolved name in the
+     document goes over together and the answers come back as a map, which is
+     what makes this affordable on a document with forty links in it. Answers
+     are cached for as long as the folder stays the same, so re-rendering on
+     every keystroke asks nothing at all.
+
+     Optimistic while it waits: an unanswered link is drawn as though it
+     resolves. The alternative is a document that flickers "missing" across
+     every link for a frame after each render, which is worse than being a
+     beat late with the truth. */
+  var wikiKnown = {};       // bare name -> true | false
+  var wikiDir = null;       // the folder those answers were about
+  var wikiAsking = {};      // names already out for an answer
+
+  function paintWikilinks() {
+    /* The folder moved under us — Save As, a tab switch, a rename. Nothing
+       learned about the old one says anything about this one. */
+    if (wikiDir !== state.docDir) {
+      wikiDir = state.docDir;
+      wikiKnown = {};
+      wikiAsking = {};
+    }
+
+    var links = el.doc.querySelectorAll('a.wikilink[data-wiki]');
+    var ask = [], seen = {};
+    for (var i = 0; i < links.length; i++) {
+      var name = links[i].getAttribute('data-wiki');
+      var known = wikiKnown[name];
+      links[i].classList.toggle('missing', known === false);
+      if (known === undefined && !wikiAsking[name] && !seen[name]) {
+        seen[name] = 1;
+        ask.push(name);
+      }
+    }
+    if (!ask.length) return;
+    ask.forEach(function (n) { wikiAsking[n] = 1; });
+    send('wikiCheck', { names: ask });
+  }
+
+  /* The shell's answer: { name: true|false }. Merged rather than replacing,
+     because a document can render again while an earlier batch is still out. */
+  function setWikiTargets(map) {
+    if (!map || typeof map !== 'object') return;
+    Object.keys(map).forEach(function (k) {
+      wikiKnown[k] = !!map[k];
+      delete wikiAsking[k];
+    });
+    var links = el.doc.querySelectorAll('a.wikilink[data-wiki]');
+    for (var i = 0; i < links.length; i++) {
+      var known = wikiKnown[links[i].getAttribute('data-wiki')];
+      links[i].classList.toggle('missing', known === false);
+    }
+  }
+
+  /* Something happened that the cached answers cannot survive: a wikilink
+     created the file it named, or a document arrived from a different folder. */
+  function forgetWikiTargets() {
+    wikiKnown = {};
+    wikiAsking = {};
+    wikiDir = null;
+    paintWikilinks();
+  }
 
   /* ---------------- sanitiser ----------------
      Markdown may carry raw HTML and marked passes it straight through, so
@@ -835,9 +909,13 @@ window.MM = (function () {
      frame late — the pane's by the next typewriter pass, the textarea's by
      its own scroll handler — and that one late frame is the flash. Measure,
      then restore both before the browser is given a chance to paint. */
+  /* Same reason as autosize below: `auto` floors at the rows attribute, not at
+     the content. It shows less here, because the source pane is nearly always
+     taller than two rows, but an empty document still got a field with a blank
+     line under the caret. */
   function autosizeSrc() {
     var keep = el.srcScroll.scrollTop;
-    el.src.style.height = 'auto';
+    el.src.style.height = '0px';
     el.src.style.height = el.src.scrollHeight + 'px';
     if (el.src.scrollTop !== 0) el.src.scrollTop = 0;
     if (el.srcScroll.scrollTop !== keep) setScroll('src', keep);
@@ -873,6 +951,7 @@ window.MM = (function () {
     fixImages(el.doc);
     invalidateAnchors();
     if (top !== null && el.prevPane.scrollTop !== top) setScroll('prev', top);
+    paintWikilinks();
     if (MM.onDocRendered) MM.onDocRendered();
     /* every block node the bin could have been parked against has just been
        thrown away, and the index it held may now name a different block */
@@ -925,6 +1004,17 @@ window.MM = (function () {
   }
 
   function updateSaved() {
+    /* A file that has stopped being written outranks the time of the last one
+       that was. "saved 4m ago" is true and useless in that state: it is the
+       last good write being reported as though nothing had changed since. */
+    if (state.saveTrouble) {
+      el.stSaved.textContent = 'not saving';
+      el.stSaved.title = state.saveTrouble + '\n\nThe text on screen is safe. Use \u2318S to save it somewhere else.';
+      el.stSaved.classList.add('trouble');
+      return;
+    }
+    el.stSaved.classList.remove('trouble');
+    el.stSaved.title = '';
     if (!state.savedAt) { el.stSaved.textContent = ''; return; }
     var d = Math.round((Date.now() - state.savedAt) / 1000);
     var txt = d < 5 ? 'saved just now' : d < 60 ? 'saved ' + d + 's ago'
@@ -937,7 +1027,10 @@ window.MM = (function () {
   function updateCaretStatus() {
     if (state.mode === 'live') {
       var i = state.editing ? state.editing.i + 1 : 0;
-      el.stPos.textContent = i ? ('Block ' + i + ' of ' + state.blocks.length) : (state.blocks.length + ' blocks');
+      /* "Block" is the codebase's word for it. A writer has paragraphs, and
+         the status bar is written for the writer. */
+      el.stPos.textContent = i ? ('Paragraph ' + i + ' of ' + state.blocks.length)
+                               : (state.blocks.length + ' paragraph' + (state.blocks.length === 1 ? '' : 's'));
       return;
     }
     var pos = el.src.selectionStart || 0;
@@ -1194,9 +1287,17 @@ window.MM = (function () {
 
   /* ---------------- live block editing ---------------- */
   /* same collapse-and-restore care as autosizeSrc, one pane over */
+  /* Zero rather than auto, and that is the whole fix for a block that sat one
+     line taller than its text. `height: auto` on a textarea does not mean "as
+     tall as the content" — it means as tall as the `rows` attribute, which
+     defaults to 2. scrollHeight measured in that state can never come back
+     smaller than two rows, so every one-line paragraph opened into a two-line
+     field. At height 0 there is no floor to clear, and scrollHeight is the
+     content plus the padding, which under border-box is exactly the height to
+     set. */
   function autosize(ta) {
     var keep = el.prevPane.scrollTop;
-    ta.style.height = 'auto';
+    ta.style.height = '0px';
     ta.style.height = (ta.scrollHeight + 2) + 'px';
     if (ta.scrollTop !== 0) ta.scrollTop = 0;
     if (el.prevPane.scrollTop !== keep) setScroll('prev', keep);
@@ -1278,7 +1379,9 @@ window.MM = (function () {
     node.classList.add('editing');
     node.innerHTML = '';
     var ta = document.createElement('textarea');
-    ta.className = 'blk-edit'; ta.spellcheck = true; ta.value = src;
+    /* One row, so nothing about this field's natural size can floor the
+       measurement autosize takes a line later. */
+    ta.className = 'blk-edit'; ta.rows = 1; ta.spellcheck = true; ta.value = src;
     node.appendChild(ta);
     autosize(ta);
     state.editing = { node: node, ta: ta, i: i };
@@ -1822,6 +1925,9 @@ window.MM = (function () {
       docDir: state.docDir,
       dirty: state.dirty,
       savedAt: state.savedAt,
+      /* Travels with the tab: an unwritable file is a property of the
+         document, not of which one happens to be on screen. */
+      saveTrouble: state.saveTrouble,
       /* Copies. The live stacks are mutated in place by every keystroke, so
          handing over the arrays themselves would leave a parked session
          growing along with the one on screen. */
@@ -1841,7 +1947,7 @@ window.MM = (function () {
   function sessionBlank(name, dir, text) {
     return {
       text: text || '', fileName: name || 'Untitled.md', docDir: dir || '',
-      dirty: false, savedAt: null, undo: [], redo: [],
+      dirty: false, savedAt: null, saveTrouble: null, undo: [], redo: [],
       scrollSrc: 0, scrollPrev: 0, sel: null, lastBlock: 0
     };
   }
@@ -1863,6 +1969,7 @@ window.MM = (function () {
     state.docDir = s.docDir || '';
     state.fileName = s.fileName || 'Untitled.md';
     state.savedAt = s.savedAt || null;
+    state.saveTrouble = s.saveTrouble || null;
 
     setText(s.text || '', { immediate: true, markDirty: false });
     state.lastBlock = s.lastBlock || 0;
@@ -3082,6 +3189,7 @@ window.MM = (function () {
     setScroll: setScroll, invalidateAnchors: invalidateAnchors,
     sessionCapture: sessionCapture, sessionRestore: sessionRestore,
     sessionBlank: sessionBlank,
+    setWikiTargets: setWikiTargets, forgetWikiTargets: forgetWikiTargets,
     onDocRendered: null, onPreviewScroll: null, onDirty: null
   };
   return MM;
