@@ -1,0 +1,350 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2870
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\froman\fcharset0 Times-Bold;\f1\froman\fcharset0 Times-Roman;\f2\fmodern\fcharset0 Courier;
+\f3\froman\fcharset0 Times-Italic;\f4\fnil\fcharset0 LucidaGrande;\f5\fnil\fcharset0 LucidaGrande-Bold;
+\f6\fmodern\fcharset0 Courier-Bold;\f7\fnil\fcharset0 HelveticaNeue;}
+{\colortbl;\red255\green255\blue255;\red0\green0\blue0;\red109\green109\blue109;\red0\green0\blue0;
+\red179\green179\blue179;}
+{\*\expandedcolortbl;;\cssrgb\c0\c0\c0;\cssrgb\c50196\c50196\c50196;\cssrgb\c0\c0\c0\c84706;
+\cssrgb\c75294\c75294\c75294;}
+{\*\listtable{\list\listtemplateid1\listhybrid{\listlevel\levelnfc23\levelnfcn23\leveljc0\leveljcn0\levelfollow0\levelstartat0\levelspace360\levelindent0{\*\levelmarker \{disc\}}{\leveltext\leveltemplateid1\'01\uc0\u8226 ;}{\levelnumbers;}\fi-360\li720\lin720 }{\listname ;}\listid1}}
+{\*\listoverridetable{\listoverride\listid1\listoverridecount0\ls1}}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\deftab720
+\pard\pardeftab720\sa321\partightenfactor0
+
+\f0\b\fs48 \cf0 \expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 Polish audit \'97 what stands between minimark and "finished"\
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f1\b0\fs24 \cf0 Written 4 September 2026, against 
+\f2\fs26 tabs
+\f1\fs24  at 
+\f2\fs26 ef72d8a
+\f1\fs24  plus the uncommitted reveal work. Read this before picking up polish work; it is ordered by what it costs a person, not by what it costs to fix.\
+Ground truth first, because it changes how the list should be read: 
+\f2\fs26 ./build.sh
+\f1\fs24  produces a clean universal binary, 
+\f2\fs26 codesign --verify
+\f1\fs24  passes, and all eight test suites are green (34 focus assertions, 13 encoding assertions, and the rest). 
+\f0\b Nothing below is breakage.
+\f1\b0  It is the gap between an app that works and an app that nobody has to be forgiving about.\
+Everything here was verified against the source or against the running app, not inferred from the roadmap.\
+\pard\pardeftab720\partightenfactor0
+\cf3 \strokec3 \
+\pard\pardeftab720\sa298\partightenfactor0
+
+\f0\b\fs36 \cf0 \strokec2 Tier 1 \'97 costs someone their work, or their trust\
+\pard\pardeftab720\sa280\partightenfactor0
+
+\fs28 \cf0 1. An untitled document is never written anywhere\
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f2\b0\fs26 \cf0 scheduleAutosave
+\f1\fs24  (
+\f2\fs26 minimark.swift:1914
+\f1\fs24 ) returns early unless 
+\f3\i some
+\f1\i0  tab has a URL, and 
+\f2\fs26 runAutosave
+\f1\fs24  writes only 
+\f2\fs26 tab.dirty && tab.url != nil
+\f1\fs24 . Session restore drops untitled tabs because there is nowhere to put their text. So everything typed before the first 
+\f4 \uc0\u8984 
+\f1 S lives in one WKWebView's memory and nowhere else.\
+A normal quit asks. A crash, a force-quit, a power cut, a WebKit process crash: all silent, all total. Tabs made this worse rather than better, because several untitled documents at once is now one 
+\f4 \uc0\u8984 
+\f1 T away.\
+The fix is the one the roadmap already names. Write untitled buffers to 
+\f2\fs26 ~/Library/Application Support/minimark/unsaved/
+\f1\fs24  on the same 1s debounce, and offer them back at launch. It closes the session-restore hole in the same move.\
+\pard\pardeftab720\sa280\partightenfactor0
+
+\f0\b\fs28 \cf0 2. Autosave fails silently, and the status bar says everything is fine\
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f2\b0\fs26 \cf0 write(text, to: url, silent: true)
+\f1\fs24  with 
+\f2\fs26 guard \'85 else \{ return \}
+\f1\fs24 . A read-only volume, a full disk, an ejected drive, a permissions change: the file stops being saved and 
+\f3\i nothing on screen changes
+\f1\i0 . Worse, 
+\f2\fs26 updateSaved
+\f1\fs24  keeps showing "saved 4m ago" from the last successful write, which reads as reassurance.\
+The silence was the right call, since the old behaviour was an alert a second. The counting is what was never finished. Count consecutive failures per tab, and on the third say so once, in the status bar rather than in a sheet.\
+\pard\pardeftab720\sa280\partightenfactor0
+
+\f0\b\fs28 \cf0 3. Rename can make the file disappear\
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f2\b0\fs26 \cf0 renameDocument
+\f1\fs24  (
+\f2\fs26 :1880
+\f1\fs24 ) strips 
+\f2\fs26 /
+\f1\fs24  and 
+\f2\fs26 :
+\f1\fs24  and trims whitespace. It does not strip a leading dot. Rename to 
+\f2\fs26 .notes
+\f1\fs24  and the file is still there and Finder will never show it again. One line, and the cheapest fix on this list.\
+\pard\pardeftab720\sa280\partightenfactor0
+
+\f0\b\fs28 \cf0 4. iCloud, Dropbox and git worktrees will produce conflicts\
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f1\b0\fs24 \cf0 Nothing uses 
+\f2\fs26 NSFileCoordinator
+\f1\fs24  or 
+\f2\fs26 NSFilePresenter
+\f1\fs24 . A 2-second mtime poll (
+\f2\fs26 kWatchInterval
+\f1\fs24 ) races a 1-second autosave (
+\f2\fs26 kAutosaveDelay
+\f1\fs24 ). For a markdown editor the likely audience keeps its notes in exactly those places, so this is not an edge case. It is the default deployment.\
+Bigger than the three above and worth scheduling on its own.\
+\pard\pardeftab720\partightenfactor0
+\cf3 \strokec3 \
+\pard\pardeftab720\sa298\partightenfactor0
+
+\f0\b\fs36 \cf0 \strokec2 Tier 2 \'97 friction a writer meets every day\
+\pard\pardeftab720\sa280\partightenfactor0
+
+\fs28 \cf0 5. The welcome document points at the wrong corner three times\
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f1\b0\fs24 \cf0 Verified against the running app's accessibility geometry, which is independent of rendering:\
+
+\itap1\trowd \taflags0 \trgaph108\trleft-108 \trbrdrt\brdrnil \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalc \clshdrawnil \clwWidth4508\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx4320
+\clvertalc \clshdrawnil \clwWidth6037\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+
+\f0\b \cf0 The welcome text says\cell 
+\pard\intbl\itap1\pardeftab720\qc\partightenfactor0
+\cf0 Where it actually is\cell \row
+
+\itap1\trowd \taflags0 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalc \clshdrawnil \clwWidth4508\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx4320
+\clvertalc \clshdrawnil \clwWidth6037\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+
+\f1\b0 \cf0 "Switch with the control above"\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 Split/Live is bottom-left, x\uc0\u8776 121\cell \row
+
+\itap1\trowd \taflags0 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrr\brdrnil 
+\clvertalc \clshdrawnil \clwWidth4508\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx4320
+\clvertalc \clshdrawnil \clwWidth6037\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 "Click the filename in the top left to rename it"\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 bottom-centre, x\uc0\u8776 534\cell \row
+
+\itap1\trowd \taflags0 \trgaph108\trleft-108 \trbrdrl\brdrnil \trbrdrt\brdrnil \trbrdrr\brdrnil 
+\clvertalc \clshdrawnil \clwWidth4508\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx4320
+\clvertalc \clshdrawnil \clwWidth6037\clftsWidth3 \clmart10 \clmarl10 \clmarb10 \clmarr10 \clbrdrt\brdrnil \clbrdrl\brdrnil \clbrdrb\brdrnil \clbrdrr\brdrnil \clpadt20 \clpadl20 \clpadb20 \clpadr20 \gaph\cellx8640
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 "The button beside the 
+\f0\b ?
+\f1\b0  holds six themes"\cell 
+\pard\intbl\itap1\pardeftab720\partightenfactor0
+\cf0 appearance is bottom-left (x\uc0\u8776 7), the ? is bottom-right (x\u8776 1116)\cell \lastrow\row
+\pard\pardeftab720\sa240\partightenfactor0
+\cf0 This is the first thing every new user reads, and it sends them looking in the wrong place three times before they have written a word. It is also the cheapest credibility on the whole list to buy back.\
+\pard\pardeftab720\sa280\partightenfactor0
+
+\f0\b\fs28 \cf0 6. Right-click gives a browser menu, including Inspect Element\
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f1\b0\fs24 \cf0 There is no 
+\f2\fs26 WKUIDelegate
+\f1\fs24  context-menu customisation anywhere in the shell, and 
+\f2\fs26 developerExtrasEnabled
+\f1\fs24  (
+\f2\fs26 :959
+\f1\fs24 ) and 
+\f2\fs26 isInspectable
+\f1\fs24  (
+\f2\fs26 :976
+\f1\fs24 ) are both unconditionally true. So right-clicking a word in a writing app offers Reload, Services and Inspect Element.\
+This is the loudest "there is a web view under here" tell in the product. A curated menu (Cut, Copy, Paste, Look Up, spelling suggestions, and the formatting actions already in the bubble) would do more for the feel of the app than any animation in it. Wrap the two dev-tools flags in 
+\f2\fs26 #if DEBUG
+\f1\fs24  at the same time.\
+\pard\pardeftab720\sa280\partightenfactor0
+
+\f0\b\fs28 \cf0 7. minimark cannot become the default markdown app\
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f2\b0\fs26 \cf0 LSHandlerRank
+\f1\fs24  is 
+\f2\fs26 Alternate
+\f1\fs24  for both document types in 
+\f2\fs26 Info.plist
+\f1\fs24 . It should be 
+\f2\fs26 Owner
+\f1\fs24  for markdown and stay 
+\f2\fs26 Alternate
+\f1\fs24  for plain text. Until it is, "Change All\'85" in Finder does not reliably stick, and double-clicking a 
+\f2\fs26 .md
+\f1\fs24  file opens somebody else's editor.\
+\pard\pardeftab720\sa280\partightenfactor0
+
+\f0\b\fs28 \cf0 8. Images arrive with no alt text\
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f2\b0\fs26 \cf0 insertImages
+\f1\fs24  writes 
+\f2\fs26 ![](name)
+\f1\fs24  and moves on. Nothing prompts, and the writer never thinks about it again, so every exported HTML page and every PDF ends up with unlabelled images. 
+\f2\fs26 insertLink
+\f1\fs24  already does the right thing by selecting the 
+\f2\fs26 label
+\f1\fs24  placeholder so it can be typed straight over. Images should do the same with 
+\f2\fs26 alt
+\f1\fs24 .\
+\pard\pardeftab720\sa280\partightenfactor0
+
+\f0\b\fs28 \cf0 9. The heading outline is invisible until you happen to hover it\
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f2\b0\fs26 \cf0 #scrub \{ opacity: 0 \}
+\f1\fs24  with 
+\f2\fs26 #scrub.has:hover \{ opacity: 1 \}
+\f1\fs24 . It is a good feature that essentially nobody will find, because finding it means moving the pointer into a 30px strip at the right edge for no reason. A faint resting state once a document has headings, or a brief appearance while scrolling, would earn back what it costs.\
+\pard\pardeftab720\sa280\partightenfactor0
+
+\f0\b\fs28 \cf0 10. A wikilink to a file that does not exist looks exactly like one that does\
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f1\b0\fs24 \cf0 Known and deliberately left, because telling them apart means a round trip per link. Worth revisiting with one batched round trip per render instead.\
+\pard\pardeftab720\sa280\partightenfactor0
+
+\f0\b\fs28 \cf0 11. 
+\f5 \uc0\u8984 
+\f0 , is called "Settings\'85" and opens a colour popover\
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f2\b0\fs26 \cf0 add(app, "Settings\'85", key: ",", command: "themes")
+\f1\fs24 . Pressing 
+\f4 \uc0\u8984 
+\f1 , pops a 240px appearance panel out of the bottom-left corner, with nothing connecting the keypress to the corner it came from. Either rename the item "Appearance", which is honest since appearance is all there is to set, or give it a real small settings sheet and put the appearance popover back behind its own button.\
+\pard\pardeftab720\partightenfactor0
+\cf3 \strokec3 \
+\pard\pardeftab720\sa298\partightenfactor0
+
+\f0\b\fs36 \cf0 \strokec2 Tier 3 \'97 surface\
+\pard\tx220\tx720\pardeftab720\li720\fi-720\partightenfactor0
+\ls1\ilvl0
+\fs24 \cf0 \kerning1\expnd0\expndtw0 \outl0\strokewidth0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 "Block 3 of 15" / "15 blocks"
+\f1\b0  in the status bar. "Block" is the codebase's word. A writer has paragraphs.\
+\pard\tx220\tx720\pardeftab720\li720\fi-720\partightenfactor0
+\ls1\ilvl0
+\f6\b\fs26 \cf0 \kerning1\expnd0\expndtw0 \outl0\strokewidth0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 NSHumanReadableCopyright
+\f0\fs24  is the literal string 
+\f6\fs26 minimark
+\f1\b0\fs24 , so that is what the About panel shows. No acknowledgements item either, which Phase 0 needs anyway.\
+\pard\tx220\tx720\pardeftab720\li720\fi-720\partightenfactor0
+\ls1\ilvl0
+\f0\b \cf0 \kerning1\expnd0\expndtw0 \outl0\strokewidth0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 An open block sits one line taller than its text.
+\f1\b0  
+\f2\fs26 autosize
+\f1\fs24  measures 
+\f2\fs26 scrollHeight
+\f1\fs24  after setting 
+\f2\fs26 height: auto
+\f1\fs24 , and a textarea at 
+\f2\fs26 auto
+\f1\fs24  is two rows whatever is in it. Already noted; wants its own look, because block heights move the scroll-sync anchors.\
+\ls1\ilvl0
+\f0\b \kerning1\expnd0\expndtw0 \outl0\strokewidth0 {\listtext	\uc0\u8226 	}
+\f5 \expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 \uc0\u8963 \u8997 
+\f0 D (focus level) is missing from the 
+\f5 \uc0\u8984 
+\f0 / reference footer
+\f1\b0 , though every other toggle is there.\
+\pard\tx220\tx720\pardeftab720\li720\fi-720\partightenfactor0
+\ls1\ilvl0
+\f6\b\fs26 \cf0 \kerning1\expnd0\expndtw0 \outl0\strokewidth0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 pushHistory
+\f0\fs24  loads the store synchronously on the main thread
+\f1\b0  at launch, and the store can reach 2 MB. Move it off and send 
+\f2\fs26 setHistory
+\f1\fs24  when it arrives.\
+\ls1\ilvl0
+\f6\b\fs26 \kerning1\expnd0\expndtw0 \outl0\strokewidth0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 Info.plist
+\f0\fs24  has no 
+\f6\fs26 NSSupportsSuddenTermination
+\f0\fs24 .
+\f1\b0 \
+\pard\tx220\tx720\pardeftab720\li720\fi-720\partightenfactor0
+\ls1\ilvl0
+\f0\b \cf0 \kerning1\expnd0\expndtw0 \outl0\strokewidth0 {\listtext	\uc0\u8226 	}\expnd0\expndtw0\kerning0
+\outl0\strokewidth0 \strokec2 No "Check for Updates"
+\f1\b0 , and the Help menu holds exactly one item.\
+\pard\pardeftab720\partightenfactor0
+\cf3 \strokec3 \
+\pard\pardeftab720\sa298\partightenfactor0
+
+\f0\b\fs36 \cf0 \strokec2 What this list is not\
+\pard\pardeftab720\sa240\partightenfactor0
+
+\f1\b0\fs24 \cf0 It does not touch Phase 0 (licence, NOTICES, README, vendor headers), which is still the gate on making the repo public and is tracked in 
+\f2\fs26 ROADMAP.md
+\f1\fs24 . Nor does it touch the feature gaps: table row and column editing, Mermaid, multiple windows. Those are additions. Everything above is the difference between the app being good and the app being unembarrassing, which is a different axis and a much shorter one.\
+\pard\pardeftab720\qc\partightenfactor0
+
+\f7\fs22 \cf4 \strokec4 \
+\pard\pardeftab720\partightenfactor0
+
+\f1\fs24 \cf0 \strokec2 \
+\
+\
+Task #1\
+\
+\
+Task #2\
+\
+\
+Task #3\
+\
+\
+Task #4\
+\
+\
+Task #5\
+\
+\pard\pardeftab720\partightenfactor0
+
+\f7\fs22 \cf4 \cb5 \strokec4 polish-audit.md
+\f1\fs24 \cf0 \cb1 \strokec2 \
+\pard\pardeftab720\partightenfactor0
+\cf0 {{\NeXTGraphic unknown.jpg \width22940 \height12420 \appleattachmentpadding0 \appleembedtype0 \appleaqc
+}¬}\pard\pardeftab720\partightenfactor0
+\cf0 \
+\pard\pardeftab720\sa240\partightenfactor0
+\cf0 Background \'b7 minimark\
+\pard\pardeftab720\partightenfactor0
+\cf0 Connectors\
+\pard\pardeftab720\qc\partightenfactor0
+
+\f7\fs22 \cf4 \strokec4 {{\NeXTGraphic unknown.png \width8000 \height8000 \appleattachmentpadding0 \appleembedtype0 \appleaqc
+}¬}\pard\pardeftab720\qc\partightenfactor0
+\cf4 \
+\pard\pardeftab720\partightenfactor0
+\cf4 \cb5 Desktop Commander
+\f1\fs24 \cf0 \cb1 \strokec2 \
+\
+\
+\
+\
+\
+\
+\
+\pard\pardeftab720\sa298\partightenfactor0
+
+\f0\b\fs36 \cf0 Unable to open file.\
+}
