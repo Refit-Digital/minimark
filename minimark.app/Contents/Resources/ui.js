@@ -751,10 +751,22 @@
   };
 
   /* ============================================================
-     PICKER (command palette + heading jump)
+     PICKER
+
+     One field for everything that is found by name: commands, the headings
+     in this document, recent documents, and the text itself. It used to be
+     two pickers on two keys, and the writer had to know which kind of thing
+     they were after before they could start typing for it. ⌘R still opens
+     it, already narrowed to headings, so nothing learned has to be unlearned.
+
+     A leading sigil narrows it: > commands, # headings, / recent documents.
+     Without one, text matches come last, after anything that matched by
+     name: a heading called Budget should beat the forty places the word is
+     used.
      ============================================================ */
   var pickerWrap = $('#pickerWrap'), pickerInput = $('#pickerInput'), pickerList = $('#pickerList');
   var pk = { items: [], filtered: [], sel: 0, open: false };
+  var SIGILS = { '>': 'command', '#': 'heading', '/': 'recent' };
 
   function score(hay, needle) {
     if (!needle) return 1;
@@ -772,16 +784,31 @@
   }
 
   function renderPicker() {
-    var q = pickerInput.value.trim();
+    var raw = pickerInput.value.replace(/^\s+/, '');
+    var only = SIGILS[raw.charAt(0)] || null;
+    var q = (only ? raw.slice(1) : raw).trim();
+    /* With nothing typed the commands lead, as they always have. Once there is
+       a query the best match leads whatever it is, and a tie goes to a heading,
+       which is the thing most often looked for by name. */
+    var order = q ? { heading: 0, command: 1, recent: 2 } : { command: 0, recent: 1, heading: 2 };
     pk.filtered = pk.items
+      .filter(function (it) { return !only || it.kind === only; })
       .map(function (it) { return { it: it, s: score(it.title + ' ' + (it.hint || ''), q) }; })
       .filter(function (x) { return x.s > 0; })
-      .sort(function (a, b) { return b.s - a.s; })
+      .sort(function (a, b) { return (b.s - a.s) || (order[a.it.kind] - order[b.it.kind]); })
       .map(function (x) { return x.it; })
-      .slice(0, 60);
+      .slice(0, 60)
+      .concat(only ? [] : textItems(q));
     if (pk.sel >= pk.filtered.length) pk.sel = 0;
-    if (!pk.filtered.length) { pickerList.innerHTML = '<div class="pk-empty">Nothing found</div>'; return; }
-    pickerList.innerHTML = pk.filtered.map(function (it, i) {
+    var tip = raw ? '' : '<div class="pk-tip"><kbd>&gt;</kbd>commands<kbd>#</kbd>headings' +
+      '<kbd>/</kbd>recent files<span>or type to search the text</span></div>';
+    if (!pk.filtered.length) {
+      pickerList.innerHTML = tip + '<div class="pk-empty">' +
+        (only === 'heading' ? 'No headings yet' : only === 'recent' ? 'No recent documents' : 'Nothing found') +
+        '</div>';
+      return;
+    }
+    pickerList.innerHTML = tip + pk.filtered.map(function (it, i) {
       return '<div class="pk' + (i === pk.sel ? ' sel' : '') + '" data-i="' + i + '">' +
         (it.level ? '<span class="pk-h">H' + it.level + '</span>' : '') +
         '<span class="pk-t">' + esc(it.title) + '</span>' +
@@ -790,12 +817,47 @@
     }).join('');
   }
 
-  function openPicker(items, placeholder) {
+  /* Where the query occurs in the document, as results to go to. Three
+     characters before it looks, because two match nearly every line and bury
+     everything above them. Case follows the query, as it does in find: all
+     lower case matches any case. A match in a heading is left out: the
+     heading is already in the list by name, one row up. */
+  function textItems(q) {
+    if (q.length < 3) return [];
+    var t = state.text, ci = q === q.toLowerCase();
+    var hay = ci ? t.toLowerCase() : t, needle = ci ? q.toLowerCase() : q;
+    var out = [], line = 1, counted = 0;
+    for (var at = hay.indexOf(needle); at > -1 && out.length < 20; at = hay.indexOf(needle, at + needle.length)) {
+      for (; counted < at; counted++) if (t.charCodeAt(counted) === 10) line++;
+      var ls = at ? t.lastIndexOf('\n', at - 1) + 1 : 0;
+      if (/^ {0,3}#{1,6}(\s|$)/.test(t.slice(ls, ls + 10))) continue;
+      out.push(textItem(t, at, needle.length, line));
+    }
+    return out;
+  }
+
+  function textItem(t, pos, len, line) {
+    var ls = pos ? t.lastIndexOf('\n', pos - 1) + 1 : 0, le = t.indexOf('\n', pos);
+    if (le < 0) le = t.length;
+    var from = Math.max(ls, pos - 32), to = Math.min(le, pos + len + 48);
+    return {
+      kind: 'text',
+      title: (from > ls ? '…' : '') + t.slice(from, to).replace(/\s+/g, ' ').trim() + (to < le ? '…' : ''),
+      hint: 'line ' + line,
+      key: 'Text',
+      run: function () { jumpToText(pos, len); }
+    };
+  }
+
+  function openPicker(items, placeholder, prefill) {
     pk.items = items; pk.sel = 0; pk.open = true;
-    pickerInput.value = ''; pickerInput.placeholder = placeholder || 'Type a command';
+    pickerInput.value = prefill || ''; pickerInput.placeholder = placeholder || 'Type a command';
     renderPicker();
     pickerWrap.classList.add('open');
-    setTimeout(function () { pickerInput.focus(); }, 30);
+    setTimeout(function () {
+      pickerInput.focus();
+      pickerInput.setSelectionRange(pickerInput.value.length, pickerInput.value.length);
+    }, 30);
   }
   function closePicker() {
     pk.open = false;
@@ -834,6 +896,7 @@
   function recentItems() {
     return recents.map(function (r) {
       return {
+        kind: 'recent',
         title: r.name,
         hint: 'open recent document file',
         key: 'Recent',
@@ -883,7 +946,7 @@
       { title: 'Insert horizontal rule', run: function () { insertSnippet('---'); } },
       { title: 'Insert today’s date', run: function () { insertSnippet(new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })); } },
       { title: 'Insert front matter', run: function () { insertFrontMatter(); } }
-    ].concat(recentItems()).concat(t);
+    ].concat(t);
   }
 
   function insertSnippet(text) {
@@ -896,15 +959,45 @@
     MM.setText(fm + state.text, { immediate: true });
   }
 
-  function openHeadings() {
-    var hs = headings();
-    if (!hs.length) { toast('No headings yet'); return; }
-    openPicker(hs.map(function (h) {
-      return { title: h.text || '(untitled)', level: h.level, run: function () { jumpToBlock(h.i); } };
-    }), 'Jump to heading');
+  /* Everything the field can find by name, built fresh each time it opens.
+     Text results are not in here: they depend on the query, so renderPicker
+     asks for them as it goes. */
+  function pickerItems() {
+    var commands = commandItems();
+    commands.forEach(function (it) { it.kind = 'command'; });
+    var hs = headings().map(function (h) {
+      return { kind: 'heading', title: h.text || '(untitled)', level: h.level, run: function () { jumpToBlock(h.i); } };
+    });
+    return commands.concat(hs).concat(recentItems());
   }
 
-  function openPalette() { openPicker(commandItems(), 'Type a command'); }
+  var PICKER_HINT = 'Commands, headings, recent files, text';
+
+  function openPalette(prefill) {
+    /* A block open in live view is committed first, the way find does it: its
+       text is not in the document yet, and headings and matches are read from
+       the document. */
+    if (state.mode === 'live') MM.commitEditing(true);
+    openPicker(pickerItems(), PICKER_HINT, prefill);
+  }
+  function openHeadings() { openPalette('#'); }
+
+  /* A text result, gone to: the match selected, in whichever view is up. */
+  function jumpToText(pos, len) {
+    if (state.mode === 'split') {
+      el.src.focus();
+      el.src.setSelectionRange(pos, pos + len);
+      MM.markCurrentLine(); MM.updateCaretStatus();
+      var ln = el.hl.children[state.text.slice(0, pos).split('\n').length - 1];
+      if (ln) el.srcScroll.scrollTo({ top: Math.max(0, ln.offsetTop - el.srcScroll.clientHeight * 0.4), behavior: 'smooth' });
+      return;
+    }
+    var bi = MM.blockIndexForOffset(pos);
+    var start = MM.blockStartOffsets()[bi] || 0;
+    MM.editBlock(bi, pos - start, true);
+    var ta = MM.activeTextarea();
+    if (ta) ta.setSelectionRange(pos - start, pos - start + len);
+  }
 
   /* ============================================================
      WINDOW DRAG STRIP
@@ -2494,11 +2587,12 @@
     '## Getting around',
     '',
     'Press `⌘K` for the command palette. Everything lives in there, so nothing',
-    'needs to live on the toolbar.',
+    'needs to live on the toolbar. It finds headings, recent files and text too;',
+    'start with `>`, `#` or `/` to look for only commands, headings or files.',
     '',
     '| Key | Does |',
     '| --- | --- |',
-    '| ⌘K | Command palette |',
+    '| ⌘K | Commands, headings, recent files, text |',
     '| ⌘R | Jump to a heading |',
     '| ⌘F | Find and replace |',
     '| ⌃⌥Z | Zen mode |',

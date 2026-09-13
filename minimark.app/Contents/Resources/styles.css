@@ -1133,6 +1133,10 @@ body.zen #find { top: calc(var(--fade-h) + 6px); }
 .pk.sel .pk-k { color: var(--accent); }
 .pk.sel .pk-hint { color: var(--muted); }
 .pk-empty { padding: 18px; text-align: center; color: var(--faint); font-size: 12.5px; }
+.pk-tip { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px; padding: 4px 10px 8px; font-size: 11.5px; color: var(--faint); }
+.pk-tip kbd { font: 600 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); background: var(--accent-soft); border-radius: 4px; padding: 0 5px; margin-left: 6px; }
+.pk-tip kbd:first-child { margin-left: 0; }
+.pk-tip span { margin-left: 8px; }
 
 /* ============================================================
    version history browser
