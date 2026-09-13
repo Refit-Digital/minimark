@@ -126,6 +126,7 @@ const bin = path.join(dir, 'coord');
    into an enum of their own rather than rewritten. */
 const harness = `
 import Foundation
+import CryptoKit
 ${/* Balancing braces from a `let` with none of its own runs on to the end of
       the next block, so this one arrives with the rest of the constants block
       — kWatchSettle, kLooksBeforeGone and kAbsentBeforeGone among them — in
@@ -150,6 +151,7 @@ ${extract('    static func writeToDisk')}
    nothing to do with anything below. Stubbed for the same reason AppDelegate is
    stubbed: so that the DocTab under test is the app's own and not a copy of it. */
 enum Scratch { static func remove(_ id: String) {} }
+${extract('struct Authorship {')}
 ${extract('final class DocTab')}
 
 /* Everything DocPresenter asks of the app it reports to, and nothing else, so

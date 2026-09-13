@@ -17,6 +17,7 @@
 import AppKit
 import WebKit
 import UniformTypeIdentifiers
+import CryptoKit
 
 // ============================================================================
 // Constants
@@ -1755,6 +1756,463 @@ final class PeekProbe: NSView {
 }
 
 // ============================================================================
+// Authorship
+//
+// iA Writer keeps a record of who wrote what at the end of a Markdown file,
+// in a format it publishes as Markdown Annotations
+// (https://github.com/iainc/Markdown-Annotations):
+//
+//     The text itself.
+//
+//     ---
+//     Annotations: 0,17 SHA-256 5b4d4a5ec8a3e3e1c9d0
+//     @Somebody: 0,3
+//     &AI: 4,4
+//     ...
+//
+// Ranges count grapheme clusters, and the hash is of the text they point
+// into, which is how iA notices when a range has stopped pointing at what it
+// did. minimark does not show authorship, but it must not break it. Typing one
+// word into a file like this used to leave every range after that word one
+// word early — "Misplaced Authorship", as iA puts it — and the block itself
+// sat at the bottom of the page, one careless selection away from gone.
+//
+// So the block is taken off before the page sees the text, and put back on
+// every write with its ranges carried through whatever changed and its hash
+// taken again. Text typed here is nobody's: an insertion inside somebody's
+// range splits the range rather than being credited to them, because minimark
+// does not know who is typing and does not guess. iA's own `writer` tool does
+// exactly the same, and tools/authorship-test.js holds this to its output
+// byte for byte.
+//
+// A block this cannot vouch for is carried exactly as it was found — a hash
+// that already disagrees with the text, or an annotation of a kind the spec
+// has not published yet. Taking the hash again over ranges that were already
+// wrong would make them look right, and the whole worth of the hash is that
+// nothing can do that.
+// ============================================================================
+
+struct Authorship {
+    /// The text the page is given: the file without the block.
+    let body: String
+    /// Everything in the file after `body`, as it was read or last written.
+    let tail: String
+    /// What the block says, when it can be kept up to date. nil when it is
+    /// carried as found.
+    let block: Block?
+
+    struct Block {
+        /// "Annotations", or whatever the document's language calls it.
+        let hashKey: String
+        /// How many hex digits of the hash the file kept, 20 to 64.
+        let hashDigits: Int
+        /// "\n" or "\r\n", whichever the block was written with.
+        let newline: String
+        /// Each author's key exactly as it was written, escapes and all, and
+        /// the grapheme ranges that are theirs.
+        var authors: [(key: String, ranges: [Range<Int>])]
+    }
+
+    /// The file as the text and its block, or nil when there is no block at
+    /// the end of it. That is nearly every file, and this runs on every read,
+    /// so the refusals come first and cost next to nothing.
+    static func split(_ file: String) -> Authorship? {
+        var end = file.endIndex
+        while end > file.startIndex, file[file.index(before: end)].isWhitespace {
+            end = file.index(before: end)
+        }
+        guard file[..<end].hasSuffix("...") else { return nil }
+        let dots = file.index(end, offsetBy: -3)
+        guard dots > file.startIndex else { return nil }
+        let newlineAt = file.index(before: dots)
+        guard file[newlineAt].isNewline else { return nil }
+
+        // Up from the dots to the dashes, a line at a time.
+        var lines: [Substring] = []
+        var lineEnd = newlineAt
+        var dashes: String.Index?
+        while lines.count < 10_000 {
+            var lineStart = lineEnd
+            while lineStart > file.startIndex, !file[file.index(before: lineStart)].isNewline {
+                lineStart = file.index(before: lineStart)
+            }
+            let line = file[lineStart..<lineEnd]
+            if trimmed(line) == "---" { dashes = lineStart; break }
+            lines.append(line)
+            guard lineStart > file.startIndex else { break }
+            lineEnd = file.index(before: lineStart)
+        }
+        // A block starts with its hash, and without one this is only a file
+        // that happens to end in three dots.
+        guard let dashStart = dashes, let top = lines.last, let head = annotation(top) else { return nil }
+        let hash = head.value.split(whereSeparator: { $0 == " " || $0 == "\t" })
+        guard hash.count == 3, let covered = range(hash[0]), hash[1] == "SHA-256",
+              (20...64).contains(hash[2].count), hash[2].allSatisfy(\.isHexDigit) else { return nil }
+
+        // Where the text ends: before the dashes, less the empty line kept
+        // between the two, less the last newline when the hash leaves it out.
+        let upToDashes = file[..<dashStart]
+        var body = upToDashes
+        if body.last?.isNewline == true, body.dropLast().last?.isNewline == true {
+            body = body.dropLast()
+        }
+        if body.count != covered.upperBound {
+            if body.last?.isNewline == true, body.count - 1 == covered.upperBound {
+                body = body.dropLast()
+            } else if upToDashes.count == covered.upperBound {
+                body = upToDashes
+            }
+        }
+
+        var authors: [(key: String, ranges: [Range<Int>])] = []
+        var understood = true
+        for line in lines.reversed().dropFirst() {
+            guard let lead = line.first, lead != " ", lead != "\t",
+                  let author = annotation(line), let kind = author.key.first,
+                  kind == "@" || kind == "&" || kind == "*" else { understood = false; break }
+            let ranges = author.value.split(whereSeparator: { $0 == " " || $0 == "\t" }).map { range($0) }
+            guard ranges.allSatisfy({ $0 != nil }) else { understood = false; break }
+            authors.append((key: String(author.key), ranges: ranges.compactMap { $0 }))
+        }
+        let valid = understood
+            && covered.upperBound <= body.count
+            && authors.allSatisfy { $0.ranges.allSatisfy {
+                $0.lowerBound >= covered.lowerBound && $0.upperBound <= covered.upperBound } }
+            && sha256(body.dropFirst(covered.lowerBound).prefix(covered.count))
+                .hasPrefix(hash[2].lowercased())
+
+        return Authorship(body: String(body), tail: String(file[body.endIndex...]),
+                          block: valid ? Block(hashKey: String(head.key), hashDigits: hash[2].count,
+                                               newline: String(file[newlineAt]), authors: authors)
+                                       : nil)
+    }
+
+    /// The file to write when the page's text is `text`, and what to keep for
+    /// the write after it.
+    func carried(to text: String) -> (file: String, next: Authorship) {
+        if text == body { return (text + tail, self) }
+        guard var block = block else {
+            // Carried as found. The one thing done to it is keeping the dashes
+            // at the start of a line, which is what makes the block a block.
+            let joined = text.last.map { !$0.isNewline } ?? false
+            let rest = joined && tail.first?.isNewline != true ? "\n" + tail : tail
+            return (text + rest, Authorship(body: text, tail: rest, block: nil))
+        }
+
+        let moved = Authorship.survivors(Array(body), Array(text))
+        block.authors = block.authors.map { author -> (key: String, ranges: [Range<Int>]) in
+            var kept: [Int] = []
+            for r in author.ranges {
+                for i in r where i < moved.count && moved[i] >= 0 { kept.append(moved[i]) }
+            }
+            return (key: author.key, ranges: Authorship.runs(kept))
+        }
+
+        // Written the way iA writes it, down to the two trailing spaces that
+        // keep the block legible as lines in apps that render it as Markdown.
+        let nl = block.newline
+        var rest = text.last?.isNewline == true ? "" : nl
+        rest += nl + "---" + nl
+        rest += "\(block.hashKey): 0,\(text.count) SHA-256 "
+            + "\(Authorship.sha256(text[...]).prefix(block.hashDigits))  " + nl
+        for author in block.authors {
+            let ranges = author.ranges.map { $0.count == 1 ? "\($0.lowerBound)" : "\($0.lowerBound),\($0.count)" }
+            rest += "\(author.key): " + ranges.joined(separator: " ") + "  " + nl
+        }
+        rest += "..." + nl
+        return (text + rest, Authorship(body: text, tail: rest, block: block))
+    }
+
+    private static func sha256(_ text: Substring) -> String {
+        SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func trimmed(_ s: Substring) -> Substring {
+        var s = s
+        while let c = s.first, c == " " || c == "\t" { s.removeFirst() }
+        while let c = s.last, c == " " || c == "\t" { s.removeLast() }
+        return s
+    }
+
+    /// A line as key and value, split at the first colon that is not escaped.
+    /// The key keeps its escapes, so that it is written back as it came.
+    private static func annotation(_ line: Substring) -> (key: Substring, value: Substring)? {
+        var escaped = false
+        var i = line.startIndex
+        while i < line.endIndex {
+            let c = line[i]
+            if escaped { escaped = false }
+            else if c == "\\" { escaped = true }
+            else if c == ":" { return (trimmed(line[..<i]), trimmed(line[line.index(after: i)...])) }
+            i = line.index(after: i)
+        }
+        return nil
+    }
+
+    /// "12" or "12,5". A lone number is a range of one.
+    private static func range(_ token: Substring) -> Range<Int>? {
+        let parts = token.split(separator: ",", omittingEmptySubsequences: false)
+        guard parts.count <= 2,
+              parts.allSatisfy({ !$0.isEmpty && $0.allSatisfy { $0.isASCII && $0.isNumber } }),
+              let start = Int(parts[0]), let length = parts.count == 2 ? Int(parts[1]) : 1,
+              length <= Int.max - start else { return nil }
+        return start..<(start + length)
+    }
+
+    /// Positions as the fewest ranges that cover them.
+    private static func runs(_ positions: [Int]) -> [Range<Int>] {
+        var out: [Range<Int>] = []
+        for p in positions.sorted() {
+            if let last = out.last, p <= last.upperBound {
+                if p == last.upperBound { out[out.count - 1] = last.lowerBound..<(p + 1) }
+            } else {
+                out.append(p..<(p + 1))
+            }
+        }
+        return out
+    }
+
+    /// Where each grapheme of `old` ended up in `new`, or -1 where it did not
+    /// survive.
+    ///
+    /// A character diff, which is all an ordinary edit needs. A change too big
+    /// for that to finish promptly — a replace-all across a long document — is
+    /// diffed by lines instead, and by characters inside each line that
+    /// changed. One too big even for that keeps only the ends the two texts
+    /// share, and the ranges in between are lost rather than guessed at: iA
+    /// shows lost authorship as nobody's, where a guess would be misplaced.
+    private static func survivors(_ old: [Character], _ new: [Character]) -> [Int] {
+        var map = [Int](repeating: -1, count: old.count)
+
+        var charIDs: [Character: Int] = [:]
+        func ids(_ chars: [Character], _ span: Range<Int>) -> [Int] {
+            var out: [Int] = []
+            out.reserveCapacity(span.count)
+            for i in span {
+                if let id = charIDs[chars[i]] { out.append(id); continue }
+                let id = charIDs.count
+                charIDs[chars[i]] = id
+                out.append(id)
+            }
+            return out
+        }
+        func diffChars(_ sa: Range<Int>, _ sb: Range<Int>) -> Bool {
+            guard let pairs = matches(ids(old, sa), ids(new, sb)) else { return false }
+            for (x, y) in pairs { map[sa.lowerBound + x] = sb.lowerBound + y }
+            return true
+        }
+
+        if !diffChars(0..<old.count, 0..<new.count) {
+            var head = 0
+            while head < old.count, head < new.count, old[head] == new[head] {
+                map[head] = head
+                head += 1
+            }
+            var tail = 0
+            while tail < old.count - head, tail < new.count - head,
+                  old[old.count - 1 - tail] == new[new.count - 1 - tail] {
+                map[old.count - 1 - tail] = new.count - 1 - tail
+                tail += 1
+            }
+            // A line is its characters up to and including its newline,
+            // compared whole through an id.
+            var lineIDs: [String: Int] = [:]
+            func lines(_ chars: [Character], _ span: Range<Int>) -> (ids: [Int], starts: [Int]) {
+                var out: [Int] = [], starts: [Int] = []
+                var start = span.lowerBound
+                for i in span where chars[i].isNewline || i == span.upperBound - 1 {
+                    let line = String(chars[start...i])
+                    let id = lineIDs[line] ?? lineIDs.count
+                    lineIDs[line] = id
+                    out.append(id)
+                    starts.append(start)
+                    start = i + 1
+                }
+                starts.append(span.upperBound)       // line k runs from starts[k] to starts[k + 1]
+                return (out, starts)
+            }
+            let la = lines(old, head..<(old.count - tail)), lb = lines(new, head..<(new.count - tail))
+            if let pairs = matches(la.ids, lb.ids) {
+                var i = 0, j = 0
+                for (li, lj) in pairs + [(la.ids.count, lb.ids.count)] {
+                    if li > i, lj > j { _ = diffChars(la.starts[i]..<la.starts[li], lb.starts[j]..<lb.starts[lj]) }
+                    if li < la.ids.count {
+                        let from = la.starts[li], to = lb.starts[lj]
+                        for k in 0..<(la.starts[li + 1] - from) { map[from + k] = to + k }
+                    }
+                    i = li + 1
+                    j = lj + 1
+                }
+            }
+        }
+        slide(&map, old, new)
+        return map
+    }
+
+    /// An insertion or a deletion that could sit a few characters to either
+    /// side and make the same text — deleting one of two spaces, typing a word
+    /// next to a copy of its own first letter — moved to the boundary a reader
+    /// would draw: a line break over a space, a space over a letter. Scored the
+    /// way the diff iA Writer uses scores it (diff-match-patch's
+    /// cleanupSemanticLossless), so the space between two authors' sentences
+    /// ends up with whichever of them iA would give it to.
+    private static func slide(_ map: inout [Int], _ old: [Character], _ new: [Character]) {
+        var i = 0
+        while i < map.count {
+            // A slide can use up the whole run after an edit, and then there
+            // is no run to start from until the next match.
+            guard map[i] >= 0 else { i += 1; continue }
+            var end = i                                        // the run of matches before the edit
+            while end + 1 < map.count, map[end + 1] == map[end] + 1 { end += 1 }
+            var next = end + 1                                 // and the run after it
+            while next < map.count, map[next] < 0 { next += 1 }
+            guard next < map.count else { return }
+            var after = next
+            while after + 1 < map.count, map[after + 1] == map[after] + 1 { after += 1 }
+
+            let deleted = next - end - 1, inserted = map[next] - map[end] - 1
+            if deleted > 0, inserted == 0 {
+                let k = shift(old, i, end + 1, next, after + 1)
+                if k < 0 {
+                    for t in 0..<(-k) { map[next + k + t] = map[end + 1 + k + t]; map[end + 1 + k + t] = -1 }
+                } else {
+                    for t in 0..<k { map[end + 1 + t] = map[next + t]; map[next + t] = -1 }
+                }
+                i = next + k
+            } else if inserted > 0, deleted == 0 {
+                let k = shift(new, map[i], map[end] + 1, map[next], map[after] + 1)
+                if k < 0 {
+                    let to = map[next]
+                    for t in 0..<(-k) { map[end + 1 + k + t] = to + k + t }
+                    i = end + 1 + k
+                } else {
+                    let to = map[end] + 1
+                    for t in 0..<k { map[next + t] = to + t }
+                    i = next + k
+                }
+            } else {
+                i = next
+            }
+        }
+    }
+
+    /// How far the edit at t[p..<q] moves, between t[e1..<p] and t[q..<e2].
+    private static func shift(_ t: [Character], _ e1: Int, _ p: Int, _ q: Int, _ e2: Int) -> Int {
+        var left = 0
+        while left < p - e1, left < q - p, t[p - 1 - left] == t[q - 1 - left] { left += 1 }
+        var best = -left
+        var bestScore = seam(t, e1, p - left, q - left) + seam(t, p - left, q - left, e2)
+        var k = -left
+        while q + k < e2, t[p + k] == t[q + k] {
+            k += 1
+            // >= rather than >, as diff-match-patch has it: a space goes at the
+            // end of an edit rather than the start.
+            let score = seam(t, e1, p + k, q + k) + seam(t, p + k, q + k, e2)
+            if score >= bestScore { bestScore = score; best = k }
+        }
+        return best
+    }
+
+    /// How good a place `at` is to break between t[start..<at] and t[at..<to]:
+    /// 6 at the edge of either, then a blank line, a line break, the end of a
+    /// sentence, a space, punctuation, and 0 in the middle of a word.
+    private static func seam(_ t: [Character], _ start: Int, _ at: Int, _ to: Int) -> Int {
+        guard at > start, to > at else { return 6 }
+        let c1 = t[at - 1], c2 = t[at]
+        let other1 = !(c1.isLetter || c1.isNumber), other2 = !(c2.isLetter || c2.isNumber)
+        let space1 = other1 && c1.isWhitespace, space2 = other2 && c2.isWhitespace
+        let break1 = space1 && c1.isNewline, break2 = space2 && c2.isNewline
+        if (break1 && at - start >= 2 && t[at - 2].isNewline)
+            || (break2 && to - at >= 2 && t[at + 1].isNewline) { return 5 }
+        if break1 || break2 { return 4 }
+        if other1 && !space1 && space2 { return 3 }
+        if space1 || space2 { return 2 }
+        if other1 || other2 { return 1 }
+        return 0
+    }
+
+    /// The matched index pairs of a longest common subsequence, in order.
+    /// Myers' algorithm in linear space, the way diff-match-patch does it:
+    /// find the middle of the shortest edit, split there, and do each half.
+    /// nil once the work runs past `budget` steps, so that no edit can hold up
+    /// a save for long.
+    private static func matches(_ a: [Int], _ b: [Int], budget: Int = 20_000_000) -> [(Int, Int)]? {
+        var pairs: [(Int, Int)] = []
+        var steps = 0
+
+        func middle(_ ao: Int, _ n: Int, _ bo: Int, _ m: Int) -> (Int, Int)? {
+            let most = (n + m + 1) / 2
+            let off = most, size = 2 * most + 2
+            var v1 = [Int](repeating: -1, count: size), v2 = v1
+            v1[off + 1] = 0
+            v2[off + 1] = 0
+            let delta = n - m, front = delta % 2 != 0
+            var k1start = 0, k1end = 0, k2start = 0, k2end = 0
+            for d in 0..<most {
+                var k1 = -d + k1start
+                while k1 <= d - k1end {
+                    let i1 = off + k1
+                    var x1 = k1 == -d || (k1 != d && v1[i1 - 1] < v1[i1 + 1]) ? v1[i1 + 1] : v1[i1 - 1] + 1
+                    var y1 = x1 - k1
+                    while x1 < n, y1 < m, a[ao + x1] == b[bo + y1] { x1 += 1; y1 += 1; steps += 1 }
+                    v1[i1] = x1
+                    steps += 1
+                    if x1 > n { k1end += 2 }
+                    else if y1 > m { k1start += 2 }
+                    else if front {
+                        let i2 = off + delta - k1
+                        if i2 >= 0, i2 < size, v2[i2] != -1, x1 >= n - v2[i2] { return (x1, y1) }
+                    }
+                    k1 += 2
+                }
+                var k2 = -d + k2start
+                while k2 <= d - k2end {
+                    let i2 = off + k2
+                    var x2 = k2 == -d || (k2 != d && v2[i2 - 1] < v2[i2 + 1]) ? v2[i2 + 1] : v2[i2 - 1] + 1
+                    var y2 = x2 - k2
+                    while x2 < n, y2 < m, a[ao + n - x2 - 1] == b[bo + m - y2 - 1] { x2 += 1; y2 += 1; steps += 1 }
+                    v2[i2] = x2
+                    steps += 1
+                    if x2 > n { k2end += 2 }
+                    else if y2 > m { k2start += 2 }
+                    else if !front {
+                        let i1 = off + delta - k2
+                        if i1 >= 0, i1 < size, v1[i1] != -1, v1[i1] >= n - x2 { return (v1[i1], off + v1[i1] - i1) }
+                    }
+                    k2 += 2
+                }
+                if steps > budget { return nil }
+            }
+            return nil
+        }
+
+        func diff(_ ao: Int, _ n: Int, _ bo: Int, _ m: Int) -> Bool {
+            var ao = ao, n = n, bo = bo, m = m
+            while n > 0, m > 0, a[ao] == b[bo] {
+                pairs.append((ao, bo))
+                ao += 1; bo += 1; n -= 1; m -= 1
+            }
+            var shared = 0
+            while shared < n, shared < m, a[ao + n - 1 - shared] == b[bo + m - 1 - shared] { shared += 1 }
+            n -= shared
+            m -= shared
+            if n > 0, m > 0 {
+                if let cut = middle(ao, n, bo, m), cut.0 + cut.1 > 0, cut.0 < n || cut.1 < m {
+                    guard diff(ao, cut.0, bo, cut.1),
+                          diff(ao + cut.0, n - cut.0, bo + cut.1, m - cut.1) else { return false }
+                } else if steps > budget {
+                    return false
+                }
+            }
+            for s in 0..<shared { pairs.append((ao + n + s, bo + m + s)) }
+            return true
+        }
+
+        return diff(0, a.count, 0, b.count) ? pairs : nil
+    }
+}
+
+// ============================================================================
 // An open document
 //
 // The shell owns the tabs because it owns the files: the path, the dirty flag,
@@ -1803,6 +2261,11 @@ final class DocTab {
     /// as. A new document is UTF-8 because it has never been anything else.
     var encoding: String.Encoding = .utf8
     var encodingGuessed = false
+
+    /// iA Writer's record of who wrote what, held back from the page and put
+    /// back on every write. nil for a document without one, which is nearly
+    /// all of them. See Authorship.
+    var authorship: Authorship?
 
     /// Consecutive silent autosave failures, and whether the status bar has
     /// already been told about this run of them. A read-only volume, a full
@@ -3131,8 +3594,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                         tab.encoding = file.encoding
                         tab.encodingGuessed = file.guessed
                         tab.digest = DocTab.digest(of: file.text)
+                        tab.authorship = Authorship.split(file.text)
                         self.nextTabID += 1
-                        sit(tab, seat, file.text)
+                        sit(tab, seat, tab.authorship?.body ?? file.text)
                     case .notText:
                         // A file that has become unreadable since it was noted
                         // is skipped rather than reported: a launch is the
@@ -3520,18 +3984,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     ///
     /// `intent` is `.update` for everything except the two writes that exist to
     /// make a file — Save As, and a wikilink making the note it points at.
+    ///
+    /// `carrying` is the tab whose authorship goes with the text when that is
+    /// not the tab at `url`: Save As, whose tab is not at its new path yet.
     func write(_ text: String, to url: URL, intent: Coordinated.Intent = .update,
-               silent: Bool = false, tab: DocTab? = nil,
+               silent: Bool = false, tab: DocTab? = nil, carrying source: DocTab? = nil,
                done: @escaping (Bool) -> Void = { _ in }) {
         let target = tab ?? tabs.first { $0.url?.standardizedFileURL == url.standardizedFileURL }
         let insurance = target.map { insureSlowSave($0, text) }
-        AppDelegate.writeToDisk(text, to: url,
+        let (onDisk, commit) = carryAuthorship(text, for: source ?? target)
+        AppDelegate.writeToDisk(onDisk, to: url,
                                 encoding: target?.encoding ?? .utf8,
                                 intent: intent,
                                 presenter: presenter(for: url)) { outcome, landed in
             insurance?.cancel()
-            done(self.applyWrite(outcome, to: landed, wrote: text, silent: silent, tab: target))
+            if case .wrote = outcome { commit() }
+            done(self.applyWrite(outcome, to: landed, wrote: onDisk, silent: silent, tab: target))
         }
+    }
+
+    /// What to put on disk for the text the page gave: the text, with iA
+    /// Writer's authorship block back on the end if the tab has one — and what
+    /// to run once it is there. The tab moves on to the new block only then,
+    /// and only if nothing has handed it another in the meantime: a reload
+    /// that landed while the write was out has already said what the file is.
+    ///
+    /// Everywhere else the text goes on being only the text. The crash
+    /// insurance in particular keeps the page's copy, because that is what a
+    /// relaunch hands back to the page.
+    private func carryAuthorship(_ text: String, for tab: DocTab?) -> (String, () -> Void) {
+        guard let tab = tab, let kept = tab.authorship else { return (text, {}) }
+        let carried = kept.carried(to: text)
+        return (carried.file, { [weak tab] in
+            guard let tab = tab, tab.authorship?.body == kept.body else { return }
+            tab.authorship = carried.next
+        })
     }
 
     /// The autosave's write: the same one, plus the check only the autosave
@@ -3539,10 +4026,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     func writeFromAutosave(_ text: String, to url: URL, tab: DocTab,
                            done: @escaping (Bool) -> Void) {
         let insurance = insureSlowSave(tab, text)
+        let (onDisk, commit) = carryAuthorship(text, for: tab)
         tab.saving = true
         // .update without exception: the autosave saves documents that are on
         // disk, and it is the one write that must never be able to make a file.
-        AppDelegate.writeToDisk(text, to: url, encoding: tab.encoding,
+        AppDelegate.writeToDisk(onDisk, to: url, encoding: tab.encoding,
                                 intent: .update,
                                 presenter: presenter(for: url)) { outcome, landed in
             insurance.cancel()
@@ -3557,7 +4045,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 done(false)
                 return
             }
-            done(self.applyWrite(outcome, to: landed, wrote: text, silent: true, tab: tab))
+            if case .wrote = outcome { commit() }
+            done(self.applyWrite(outcome, to: landed, wrote: onDisk, silent: true, tab: tab))
         }
     }
 
@@ -3767,11 +4256,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             // What the file says, recorded now, so that the first outside
             // rewrite of it can be told from the first outside change to it.
             target.digest = DocTab.digest(of: text)
+            // iA Writer's authorship block is the tab's to keep, not the
+            // page's to show. See Authorship.
+            target.authorship = Authorship.split(text)
             // The text first, then the list. loadDoc parks a document named
             // against a tab that is not yet in front, so by the time setTabs
             // switches to it the page already has it — the other order shows an
             // empty document for however long the two messages take to cross.
-            self.js("if(window.App)App.loadDoc(\(jsLiteral(text))," +
+            self.js("if(window.App)App.loadDoc(\(jsLiteral(target.authorship?.body ?? text))," +
                     "\(jsLiteral(url.lastPathComponent))," +
                     "\(jsLiteral(url.deletingLastPathComponent().path)),\(target.id))")
             self.activeID = target.id
@@ -3871,7 +4363,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 // The one write in the app whose whole purpose is to make a
                 // file, so the one that says so. Everything else is a save of a
                 // document that is already there.
-                self.write(text, to: url, intent: .create) { ok in
+                self.write(text, to: url, intent: .create, carrying: target) { ok in
                     guard ok else { done(false); return }
                     target.dirty = false
                     self.setDocument(url, tab: target)
@@ -4472,13 +4964,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             // Nothing unsaved here, so there is nothing to decide: take the
             // new text, whether or not this is the document on screen.
             guard tab.dirty else {
-                reread(tab, at: url, seenAt: now) { text in
+                reread(tab, at: url, seenAt: now) { text, kept in
                     // Unless somebody typed in it while the read was out. That
                     // was impossible when this was synchronous and it is one
                     // keystroke away now, and loading over it would throw away
                     // a sentence nobody has a copy of. Left unhandled on
                     // purpose: the next pass finds the tab dirty and asks.
                     guard !tab.dirty else { return false }
+                    tab.authorship = kept
                     self.js("if(window.App)App.externalChange(\(jsLiteral(text)),\(tab.id))")
                     return true
                 }
@@ -4496,7 +4989,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             // round every two seconds. Without this the same change would ask
             // twice — or the second sheet would arrive on top of the first.
             reloadPromptUp = true
-            reread(tab, at: url, seenAt: now) { text in
+            reread(tab, at: url, seenAt: now) { text, kept in
                 // The window and the front tab were both checked on the way
                 // out, and a read can be out for a while. Anything that has
                 // changed since means there is no longer a question to ask, or
@@ -4515,6 +5008,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                     tab.dirty = false
                     self.window?.isDocumentEdited = self.tabs.contains { $0.dirty }
                     self.suddenTermination()
+                    // Keep Mine keeps the block that goes with what is on screen.
+                    tab.authorship = kept
                     self.js("if(window.App)App.externalChange(\(jsLiteral(text)),\(tab.id))")
                 }
                 return true
@@ -4565,7 +5060,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     /// finished, because it was: this is what the file says and the tab now
     /// knows it.
     private func reread(_ tab: DocTab, at url: URL, seenAt: FileMark,
-                        _ use: @escaping (String) -> Bool,
+                        _ use: @escaping (String, Authorship?) -> Bool,
                         otherwise: (() -> Void)? = nil) {
         tab.reading = true
         readTextFile(url) { outcome in
@@ -4587,7 +5082,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 otherwise?()
                 return
             }
-            guard use(file.text) else { otherwise?(); return }
+            // Without iA Writer's authorship block, and with it separately:
+            // which block the tab keeps depends on whether the page takes this
+            // text, and only the caller knows that, sometimes only after asking.
+            let kept = Authorship.split(file.text)
+            guard use(kept?.body ?? file.text, kept) else { otherwise?(); return }
             tab.encoding = file.encoding
             tab.encodingGuessed = file.guessed
             tab.mark = seenAt

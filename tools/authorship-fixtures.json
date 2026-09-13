@@ -1,0 +1,111 @@
+{
+  "generator": "iA Writer 8.0.6 (80046) Contents/MacOS/writer",
+  "bases": {
+    "two": "One. A1. Two. B1. A2. Three.\n\n---\nAnnotations: 0,29 SHA-256 275985ec6b9c3879871e  \n@Ann: 5,8 17,3  \n&Bot: 13,4  \n...\n",
+    "unicode": "Café 😀 base. Añadido.\n\n---\nAnnotations: 0,22 SHA-256 d39b3f4cec5cd1cb6c8c  \n@F: 12,9  \n...\n",
+    "zwj": "é 👨‍👩‍👧 x y\n\n---\nAnnotations: 0,8 SHA-256 8167ca234bc828ad9d21  \n*Ref <https\\://example.com>: 5,2  \n...\n",
+    "crlf": "one\r\nNEW\r\ntwo\r\n\r\n---\r\nAnnotations: 0,12 SHA-256 a838314c03021c59017b  \r\n@F: 4,4  \r\n...\r\n",
+    "nonewline": "abc def\n\n---\nAnnotations: 0,7 SHA-256 010971ea0013a09d91df  \n@F: 3,4  \n...\n",
+    "newlines": "abc def\n\n\n\n---\nAnnotations: 0,10 SHA-256 94e48ddf8ba4be16f49e  \n@F: 3,6  \n...\n",
+    "colon": "x y\n\n---\nAnnotations: 0,4 SHA-256 0f044da0abb8aabed6bb  \n@Dr\\: Who: 1,2  \n...\n",
+    "frontmatter": "---\ntitle: X\n---\n\nPara. More.\n\n---\n\nEnd.\n\n---\nAnnotations: 0,41 SHA-256 1a87fc0db7dba3f37eee  \n&Bot: 23,6  \n...\n"
+  },
+  "edits": [
+    {
+      "base": "two",
+      "name": "insert at start",
+      "text": "Hi. One. A1. Two. B1. A2. Three.\n",
+      "expected": "Hi. One. A1. Two. B1. A2. Three.\n\n---\nAnnotations: 0,33 SHA-256 cd945bdc7c51098930ff  \n@Ann: 9,8 21,3  \n&Bot: 17,4  \n...\n"
+    },
+    {
+      "base": "two",
+      "name": "insert inside an AI range",
+      "text": "One. A1. Two. BXX1. A2. Three.\n",
+      "expected": "One. A1. Two. BXX1. A2. Three.\n\n---\nAnnotations: 0,31 SHA-256 859bb771b67bf48e4789  \n@Ann: 5,8 19,3  \n&Bot: 13,2 17,2  \n...\n"
+    },
+    {
+      "base": "two",
+      "name": "delete all of one author",
+      "text": "One. A1. Two. A2. Three.\n",
+      "expected": "One. A1. Two. A2. Three.\n\n---\nAnnotations: 0,25 SHA-256 46049acb2772f06406e5  \n@Ann: 5,11  \n&Bot:   \n...\n"
+    },
+    {
+      "base": "two",
+      "name": "replace unattributed word",
+      "text": "One. A1. Two. B1. A2. 3.\n",
+      "expected": "One. A1. Two. B1. A2. 3.\n\n---\nAnnotations: 0,25 SHA-256 8e6868f106521702dc09  \n@Ann: 5,8 17,3  \n&Bot: 13,4  \n...\n"
+    },
+    {
+      "base": "two",
+      "name": "append a sentence",
+      "text": "One. A1. Two. B1. A2. Three. Four.\n",
+      "expected": "One. A1. Two. B1. A2. Three. Four.\n\n---\nAnnotations: 0,35 SHA-256 4af09a67df8987afcc63  \n@Ann: 5,8 17,3  \n&Bot: 13,4  \n...\n"
+    },
+    {
+      "base": "two",
+      "name": "delete across two authors",
+      "text": "One. A1. T A2. Three.\n",
+      "expected": "One. A1. T A2. Three.\n\n---\nAnnotations: 0,22 SHA-256 3d81f35f050f9d68987d  \n@Ann: 5,8  \n&Bot:   \n...\n"
+    },
+    {
+      "base": "two",
+      "name": "no change",
+      "text": "One. A1. Two. B1. A2. Three.\n",
+      "expected": "One. A1. Two. B1. A2. Three.\n\n---\nAnnotations: 0,29 SHA-256 275985ec6b9c3879871e  \n@Ann: 5,8 17,3  \n&Bot: 13,4  \n...\n"
+    },
+    {
+      "base": "two",
+      "name": "everything deleted",
+      "text": "",
+      "expected": "\n\n---\nAnnotations: 0,0 SHA-256 e3b0c44298fc1c149afb  \n@Ann:   \n&Bot:   \n...\n"
+    },
+    {
+      "base": "unicode",
+      "name": "emoji inserted inside a range",
+      "text": "Café 😀 base. Añ🎉adido.\n",
+      "expected": "Café 😀 base. Añ🎉adido.\n\n---\nAnnotations: 0,23 SHA-256 43fe6471c47a7f0dc4e5  \n@F: 12,3 16,6  \n...\n"
+    },
+    {
+      "base": "unicode",
+      "name": "accent deleted before a range",
+      "text": "Caf 😀 base. Añadido.\n",
+      "expected": "Caf 😀 base. Añadido.\n\n---\nAnnotations: 0,21 SHA-256 aaeaa3d4bc5e0d07648f  \n@F: 11,9  \n...\n"
+    },
+    {
+      "base": "zwj",
+      "name": "combining mark and family emoji kept",
+      "text": "é 👨‍👩‍👧 xx y\n",
+      "expected": "é 👨‍👩‍👧 xx y\n\n---\nAnnotations: 0,9 SHA-256 eff8a745fbdb6bd48272  \n*Ref <https\\\\\\://example.com>: 6,2  \n...\n"
+    },
+    {
+      "base": "crlf",
+      "name": "insert on the first line",
+      "text": "Xone\r\nNEW\r\ntwo\r\n",
+      "expected": "Xone\r\nNEW\r\ntwo\r\n\r\n---\r\nAnnotations: 0,13 SHA-256 34960f750b6842d15af1  \r\n@F: 5,4  \r\n...\r\n"
+    },
+    {
+      "base": "nonewline",
+      "name": "append without a newline",
+      "text": "abc def!",
+      "expected": "abc def!\n\n---\nAnnotations: 0,8 SHA-256 d981eed8462a773ebb07  \n@F: 3,4  \n...\n"
+    },
+    {
+      "base": "newlines",
+      "name": "drop a trailing newline",
+      "text": "abc def\n\n",
+      "expected": "abc def\n\n\n---\nAnnotations: 0,9 SHA-256 18fd6f503835e1e39b76  \n@F: 3,6  \n...\n"
+    },
+    {
+      "base": "colon",
+      "name": "insert before an escaped key",
+      "text": "zx y\n",
+      "expected": "zx y\n\n---\nAnnotations: 0,5 SHA-256 369f5b33caa6216eaf24  \n@Dr\\: Who: 2,2  \n...\n"
+    },
+    {
+      "base": "frontmatter",
+      "name": "edit after a thematic break",
+      "text": "---\ntitle: X\n---\n\nPara. More.\n\n---\n\nFin.\n",
+      "expected": "---\ntitle: X\n---\n\nPara. More.\n\n---\n\nFin.\n\n---\nAnnotations: 0,41 SHA-256 24ac6ffc916646fc052a  \n&Bot: 23,6  \n...\n"
+    }
+  ]
+}
