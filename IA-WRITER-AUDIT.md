@@ -10,19 +10,30 @@ deciding what comes next.
 
 ## 0. How this was made, and what that costs
 
-The app itself was not available to this session (cloud container, no Desktop;
-`ia.net` is blocked by the egress policy, so their documentation could not be
-fetched either). Everything below is built from three things:
+Two passes.
 
-1. iA's own published design writing and support documentation, reached through
-   search rather than directly.
-2. Third-party reviews and teardowns.
-3. A close read of minimark's source, which is the half that is verified.
+**Pass 1 (cloud session).** No app, no Desktop, `ia.net` blocked. Built from
+iA's published design writing reached through search, third-party reviews, and
+a close read of minimark's source. Seven claims were tagged **[verify in app]**.
 
-Claims about **minimark** cite file and line and are checked. Claims about
-**iA Writer** are secondhand. Where a claim would change a decision and I could
-not confirm it, it is tagged **[verify in app]**. There are seven of those. An
-hour with the running app closes all seven.
+**Pass 2 (on the Mac, same day).** iA Writer **8.0.6 (build 80046)** at
+`~/Desktop/iA Writer.app`. Permission to drive the app's UI was declined, so
+nothing here comes from clicking around. Everything in pass 2 comes from the
+bundle itself, which is first-hand and more complete than a UI tour:
+
+- the bundled Help (`Base.lproj/Help/*.html`: Markdown, Wikilinks, Content
+  Blocks, Metadata, Custom Patterns, Keyboard Shortcuts, Smart Folder Rules,
+  URL Commands, Shortcuts, Publishing, Word export) and release notes
+- every UI string table (`Localizable.strings`, `Kit.strings`,
+  `Markdown.strings`, `AppIntents.strings`, `SmartFolderRules.strings`)
+- the menu and settings nibs (`Menu.nib`, `EditorPreferences.nib`,
+  `MarkdownPreferences.nib`, `TemplatePreferences.nib`, `Annotations.nib`…)
+- the six shipped template bundles (`Resources/Templates/*.iatemplate`)
+- the bundled `writer` command-line tool (`Contents/MacOS/writer`)
+
+Six of the seven open questions are now answered (§7). Where pass 2
+contradicted pass 1, the text below has been corrected and says so. Claims
+about **minimark** cite file and line and are checked.
 
 ---
 
@@ -34,12 +45,14 @@ Strip the feature list away and iA Writer is one idea held very hard:
 
 Nothing in the app is a mode that changes the file. Focus mode dims; it does not
 edit. Syntax Control colours; it does not rewrite. Preview renders; it does not
-own. Authorship annotates; it does not touch the prose. Every feature is
-reversible, non-destructive, and describable in one sentence to somebody who has
-never used the app.
+own. Every feature is reversible, non-destructive, and describable in one
+sentence to somebody who has never used the app.
 
-That is why it reads as coherent while shipping a lot of features. The features
-are not additions to the surface, they are readings of the same surface.
+**One exception, confirmed in pass 2:** Authorship writes annotations into the
+file (§2.3), and iA then has to ship a "Misplaced Authorship" warning for when
+another app edits it. That is the cost of breaking the thesis, printed in their
+own string table. It is the best evidence in this document that the thesis is
+worth holding.
 
 Minimark shares the instinct already. Live view (`app.js`) is exactly this:
 one surface, the markdown revealed on demand, never a second document. The
@@ -52,21 +65,22 @@ question for the roadmap is not "which iA features do we clone", it is
 
 ### 2.1 Syntax Control: parts of speech as a lens
 
-**What it is.** Colour every adjective brown, noun red, adverb purple, verb
-blue, conjunction green. Toggle each class independently. The writer turns one
-on, sees the shape of the prose, turns it off.
+**What it is.** Colour adjectives, nouns, adverbs, verbs, conjunctions.
+**Verified:** each class is its own toggle (`selectSyntaxControlTarget:` per
+class in `Menu.nib`; five checkboxes in `EditorPreferences.nib`), plus
+*Enable All*, *Disable All* and *Enable Last Used*. The last one is the
+detail worth stealing: switching a lens off and on again restores the set you
+had, rather than making you rebuild it.
 
 **Why it works.** It never says a word is wrong. It shows you the distribution
-and lets you draw the conclusion. Four adverbs in one paragraph is a fact about
-your text, not an opinion about it. That framing is the whole trick: a critic
-gets switched off, a lens gets switched on.
+and lets you draw the conclusion. A critic gets switched off, a lens gets
+switched on.
 
 **What it costs.** A part-of-speech tagger. minimark deliberately refused this
-in `style-check.js:16-21`, and the reasoning there is correct: done badly it
-cries wolf until the feature is turned off for good.
+in `style-check.js:16-21`, and the reasoning there is correct.
 
 **Verdict: take the framing, not the parser.** Three lenses are decidable
-without a tagger and get most of the value:
+without a tagger:
 
 | Lens | Rule | Precision |
 |---|---|---|
@@ -74,73 +88,84 @@ without a tagger and get most of the value:
 | Long sentences | reuse `sentences()` (`app.js:1115`); tint anything over ~30 words | exact |
 | Repeated words | any non-stopword appearing 3+ times within a 200-word window | exact |
 
-All three run on the existing sentence splitter and the existing highlight
-plumbing (`--syn-*` in `styles.css:101`). None of them need a dictionary anyone
-can argue with, which was the objection in the first place.
-
 **The important part is that these are lenses, not warnings.** Off by default,
-toggled from `⌘K`, no badge counting your sins.
+toggled from `⌘K`, no badge counting your sins, and "last used" remembered.
 
 ### 2.2 Content Blocks: transclusion
 
-**What it is.** A line beginning `/` followed by a relative path embeds that
-file inline: an image, a CSV as a table, a source file as a code block, a `.txt`
-as prose. Optional caption in quotes after the path. Referenced files must live
-in the same folder or below it.
+**What it is.** A line that is just a filename embeds that file: image, CSV as
+a table, source as a code block, `.txt`/`.md` as prose. Optional caption in
+quotes after it.
 
-**Why it works.** It is the feature that turns a markdown editor into something
-you can write a book in, without introducing a project format. The chapters are
-still files. The manuscript is still a file. Nothing is locked in a database.
+**Corrected in pass 2:**
 
-**Verdict: take it, in minimark's own syntax.** Wikilinks already exist, so the
-coherent form is not iA's `/path`, it is:
+- **iA already supports `![[file]]`.** `Kit.strings` has *"Wikilink embeds
+  must be Markdown files or images."* So the syntax recommended below is not
+  minimark diverging from iA; it is the form iA added later, beside the
+  original.
+- **The leading `/` is deprecated.** Content blocks now take the bare filename
+  (shortest unique path) or `./relative`. An old `/` block raises a specific
+  upgrade warning.
+- **The failure cases each have their own message**: file does not exist,
+  unsupported extension, recursive reference (*"Recursive references are
+  ignored"*), CSV with fewer than two rows, file outside the Library. That list
+  is a ready-made spec for minimark's error states.
+- **Blocks take metadata.** Lines after an image block set `Title`, `Alt`,
+  `Width`, `Height`; after a text block they set variables for that inclusion
+  only (§8, metadata variables).
 
-```
-![[chapter-two]]
-```
+**Verdict: take it, as `![[chapter-two]]`.** One branch in the wikilink
+resolver. **One constraint to decide first:** minimark's wikilinks resolve only
+to a file *in the same folder* (`minimark.swift:5166-5197`, deliberately: a
+document may not name a path). iA resolves nearest-first: same folder, then
+subfolders, then parents. A manuscript usually wants `chapters/` beside
+`book.md`. Allowing descent into subfolders (never `..`, never absolute) keeps
+the security property and makes transclusion useful for books.
 
-which reads as "embed" to anyone who has met `[[link]]`, matches the image
-sigil, and costs one branch in the wikilink resolver. CSV-as-table is a
-cheap add on top; the table renderer is already there.
-
-This is the single highest-value item in this document. It is the difference
-between an editor for notes and an editor for a manuscript.
+This is still the single highest-value item. It is the difference between an
+editor for notes and an editor for a manuscript.
 
 ### 2.3 Authorship: what did you actually write
 
-**What it is.** Local, private tracking of which text was typed, pasted, or
-came from an AI. Typed text plain, human co-authors in pastel, AI in a gradient,
-reference material dimmed. Nothing is sent anywhere; detection is a paste
-diff, not a classifier. **[verify in app]** whether the annotations live in a
-sidecar or inline in the markdown; the third-party Obsidian port describes them
-as "Markdown Annotations", which suggests in-file.
+**What it is.** Tracking of which text was typed, pasted, or came from AI or a
+reference. Human authors in pastel tones, AI in a gradient, reference dimmed.
+Menus: *Mark As*, *Paste As*, *Paste Edits From* (diffs pasted text against
+the selection and attributes only the changes).
 
-**Why it works.** It answers a question writers now actually have, and it
-answers it by observation rather than by guessing. No "87% likely AI". Just: you
-pasted this at 14:03.
+**Verified (was [verify in app]):** *"Authorship annotations will be saved at
+the end of the file. Hidden when editing in iA Writer, and visible in other
+apps."* (`Kit.strings`, `Annotations.nib`). And the consequence: *"This file
+was edited by another app that did not correctly update authorship
+annotations. Some or all authorship may be misplaced."* Also: iA detects a
+pasted ChatGPT conversation and offers to attribute it automatically, and
+8.0.5 shipped a `writer` CLI so agents can edit files *"while preserving
+authorship"*. That is a whole toolchain built to protect data that lives
+somewhere fragile.
 
-**Verdict: take a narrow version.** Full authorship is a large feature and it
-carries a file-format decision, which for a plain-text app is the expensive kind
-of decision. But the cheap 80% is real:
+**Verdict: take the narrow version, keep it out of the file.** Unchanged, and
+now proven:
 
-- On paste, record the range and its source (`clipboard`, or a named author).
-- Store it **in the history store, not the file**: minimark already keeps local
-  version history (`ui.js:931`, up to ~170KB through the `history` pref), so the
-  provenance is already half-recorded. Nothing new touches the `.md`.
+- On paste, record the range and its source.
+- Store it **in the history store, not the file** (`ui.js:931`).
 - One lens in `⌘K`: "Show what was pasted". Ranges tint, hover says when.
 
-That keeps the file plain, which is minimark's actual promise, and still answers
-the question. The moment provenance goes into the file, minimark owns a format,
-and every other editor renders the annotations as garbage.
+The *Paste Edits From* idea is worth a note on its own: paste a revised
+version over a selection and only the differences change. Useful without any
+authorship at all (§8).
 
 ### 2.4 One search field, not three
 
-**What it is.** iA Writer 8 folded document outline into Quick Search. One
-field, `⇧⌘O`, that reaches headings, filenames, and full text at once. The
-command palette stayed separate at `⇧⌘P`.
+**What it is.** iA Writer 8 folded document outline into Quick Search:
+**`⇧⌘O`**, reaching headings, filenames and full text. **8.0.5 added result
+filters** (*Show results from: Headings / Text*, separately for *This File* and
+*Other Files*). ⌘-clicking a `#hashtag` opens Quick Search on it.
 
-**Why it matters here.** minimark currently has **three** finder surfaces built
-on the same picker widget:
+**Corrected in pass 2:** pass 1 said the command palette sits at `⇧⌘P`. The
+bundled shortcut list has `⇧⌘P` as *Page Setup*. The palette exists
+(`Commands.strings`: *"Command Palette"*, *"Search Commands"*); its shortcut is
+not in the bundled help.
+
+**Why it matters here.** minimark has three finder surfaces on one widget:
 
 | Surface | Key | Code |
 |---|---|---|
@@ -148,122 +173,101 @@ on the same picker widget:
 | Jump to heading | `⌘R` | `openHeadings` (`ui.js:899`) |
 | Find and replace | `⌘F` | `openFind` (`ui.js:1398`) |
 
-They share `openPicker` (`ui.js:793`) and the same fuzzy `score` (`ui.js:759`).
-Three keys, one mechanism, and the user has to know in advance which of three
-things they are looking for before they can start typing. Recents are already
-mixed into the palette (`recentItems`, `ui.js:828`) with the right instinct
-behind it, quoted in the comment there.
+They share `openPicker` (`ui.js:793`) and the same fuzzy `score`
+(`ui.js:759`). Recents are already mixed in (`recentItems`, `ui.js:834`).
 
-**Verdict: merge, and go further than iA did.** One field, `⌘K`, everything in
-it: commands, headings, recents, wikilink targets, and literal text matches in
-the current document. Prefix sigils for people who want to narrow (`>` command,
-`#` heading, `/` file), the way every good palette does it. `⌘R` and `⌘F` stay
-as direct shortcuts into the same field with the prefix pre-filled, so no muscle
-memory breaks.
-
-This is the most coherent thing on the list and it removes code rather than
-adding it.
+**Verdict: merge, and go further than iA did.** One field, `⌘K`: commands,
+headings, recents, wikilink targets, text matches. Prefix sigils to narrow
+(`>` command, `#` heading, `/` file). `⌘R` and `⌘F` open the same field with
+the prefix pre-filled. iA's filters are the evidence that people do want to
+narrow; sigils do it without a settings row.
 
 ### 2.5 Templates as bundles
 
-**What it is.** A template is a directory bundle: `Info.plist`, `document.html`,
-`title.html`, `header.html`, `footer.html`, `style.css`. Preview, print, and PDF
-all render through it. Users who know CSS write their own; a public GitHub repo
-holds the official set.
+**What it is, verified from the shipped bundles.** A template is a `.iatemplate`
+directory: `Info.plist` naming its pages (`IATemplateDocumentFile`,
+`IATemplateTitleFile`, `IATemplateHeaderFile`, `IATemplateFooterFile`, plus
+`IATemplateHeaderHeight`/`FooterHeight`, both `90`), and HTML pages with data
+hooks the app fills: `data-document`, `data-title`, `data-author`, `data-date`,
+`data-page-number`. Six ship: Duo, GitHub, Mono, Quattro, Sans, Serif.
 
-**Why it works.** Preview and export are the same code path, so what you see is
-literally what prints. No second renderer to drift.
+**Corrected in pass 2 (was [verify in app]):** Preview and export do **not**
+share one renderer by construction. Settings has **separate template choices
+for *Web Preview* and for *Printing & PDF Export*** (`TemplatePreferences.nib`).
+What iA did instead is give Preview **two display modes, *Web* and *PDF***
+(`Display_Mode_Web`, `Display_Mode_PDF`), with *Fit Width*, *Fit Page* and zoom
+in PDF mode. You check the print output by looking at the print output.
 
-**Verdict: mostly already done, finish it.** minimark has a templates folder and
-a user stylesheet (`fd1f671`, "Templates: a user stylesheet and a shell for HTML
-export"), plus HTML, PDF and print in the palette. The gap is:
+Template settings, all toggles, no CSS required: **title page, headers,
+footers, center headings, number headings, indent paragraphs, invert colours
+at night.**
 
-- **Live preview does not use the template.** Verify, but if Preview and Export
-  render differently, that is the exact drift iA avoided. Same CSS, same path.
-- **No header/footer split**, so PDFs have no running head or page number.
-- **No shipped set.** One good template and one plain one, in the repo, does
-  more for perceived polish than a settings pane.
+**Verdict: finish what minimark started, the iA way.** minimark has a
+templates folder, a user stylesheet (`fd1f671`) and HTML/PDF/print. The gaps:
+
+- **A PDF mode in Preview**, rendering the print path, rather than trying to
+  force the live preview and the PDF to be the same thing. Cheaper and more
+  honest.
+- **Header/footer/title page** from front matter (`title`, `author`, `date`),
+  so PDFs get a running head and page numbers.
+- **Number headings** and **indent paragraphs** as the two typographic
+  toggles worth having; they are the ones that change what a document is for.
+- **Ship two templates.**
 
 ### 2.6 Typography as a decision, not a preference
 
-**What it is.** iA shipped **one** font for seven years, then added exactly one
-more: Duospace, a modified IBM Plex Mono that gives `m`, `M`, `w`, `W` 50% extra
-width. Their argument, worth quoting in spirit: a proportional font says "this
-is nearly done"; a monospace font says "this is work in progress", and for a
-draft that is the more honest signal.
+**Corrected in pass 2:** iA no longer ships one font. The editor offers three
+faces of one family: **Mono, Duo, Quattro** (`TypographyKit.strings`), and
+templates add IBM Plex Sans and Serif for output. There is no System font and
+no unrelated faces in the editor. Other settings: *Line length limit* (in
+characters), *Emphasis* (italic or CJK emphasis mark), *Tradition*
+(Japanese, Korean, Simplified/Traditional Chinese typesetting), highlight
+colour.
 
-**Where minimark stands.** Five fonts: System, New York, Iowan, Avenir, Mono
-(`ui.js:25-36`), eight text sizes (`ui.js:40`), six themes (`ui.js:16-23`),
-a measure of `42rem` (`styles.css:57`) with a comment saying the number is not
-round on purpose. Split view drops to `38rem` (`styles.css:746`).
+**Where minimark stands.** Five unrelated fonts: System, New York, Iowan,
+Avenir, Mono (`ui.js:25-36`), default `system` (`ui.js:43`); eight sizes; six
+themes; measure `42rem` (`styles.css:57`).
 
-**Verdict: this one is a genuine disagreement, and iA is probably right.** Five
-fonts is a preference pane wearing a palette entry's clothes. Nobody's writing
-improves at Avenir. Every one of those five is a decision the app declined to
-make, handed to the user, who will spend four minutes on it and never think
-about it again.
-
-Two defensible positions, and either beats five:
-
-- **iA's:** one prose font, one mono, chosen well, no picker. Loses the theme-
-  and-font pairing that makes Cork and Sepia feel like anything.
-- **The softer one:** keep the picker, cut to three (a serif, a sans, a mono),
-  and make the default a duospace-class face rather than System. `iA Writer
-  Duospace` is Apache-licensed and on GitHub, or Plex Mono directly.
-
-The mono default is the substantive suggestion. The current default (`system`,
-`ui.js:43`) makes a draft look finished, which is the wrong signal at the exact
-moment the writer most needs to feel free to cut.
+**Verdict: iA's current position is the softer option pass 1 proposed**, so
+the recommendation firms up: **three faces from one family, mono-leaning
+default.** `iA Writer Mono/Duo/Quattro` are open-licensed on GitHub
+(`iaolo/iA-Fonts`), or IBM Plex Mono/Sans/Serif. The point stands that the
+default should make a draft look like a draft.
 
 ### 2.7 The Library, and why to say no
 
-**What it is.** A left-hand Organizer: Locations, Favorites, Smart Folders
-(dynamic, rule-based on parent or ancestor paths), and Hashtags harvested from
-`#tag` in the text. Tree view, drag and drop, inline rename, Finder context
-menus, all in-app since 7.2.
+**What it is.** A left-hand Organizer: Locations, Favorites, Smart Folders,
+Hashtags, and **Links** (*Backlinks*, *Potential Backlinks*, *Links*,
+*Potential Links*). Smart Folders are rules on parent path, ancestor path,
+kind, extension, dates, and a full search language (`#tag`, `[ ]` open tasks,
+`NEAR(time space)`, `name:`, `AND/OR/NOT`).
 
-**Why it works for them.** iA Writer is where their users keep everything.
-
-**Verdict: decline, except the tags.** A file browser is a second app inside the
-app, and it fights minimark's whole posture: `⌘K` reaching recents (`ui.js:828`)
-is the deliberate anti-Library, and the comment there argues the case well.
-Building an Organizer means owning sidebar state, sync, drag and drop, and
-Finder parity forever.
-
-**But hashtags are nearly free.** `#tag` in the text, harvested on render into
-the same picker, no sidebar, no state, no storage. It is a lens on the text,
-which is the test everything in this document should pass.
+**Verdict: decline the sidebar, take three things out of it.** Hashtags into
+the picker (unchanged). **Backlinks** and **open-task search** are the two new
+ones, both in §8, both delivered through the picker rather than a pane.
 
 ---
 
 ## 3. Where minimark is already ahead
 
-Worth stating plainly, because a study of a mature app tends to read as a list
-of deficits.
-
 | | minimark | iA Writer |
 |---|---|---|
 | **Live view** | click a paragraph, its markdown appears; click away, it renders | Editor and Preview are separate panes |
-| **Themes** | six, including textured Cork and Steel (`ui.js:16-23`) | light / dark / night inversion |
-| **Version history** | local, time-stepped, 1m to 1w (`ui.js:931`), with word deltas per revision | relies on the OS |
-| **Style check** | every entry carries a `why` (`style-check.js:25`) | colours, no explanation |
-| **Command palette** | present since early, everything in it | added in 8, alongside a menu bar |
-| **Paste a web page** | arrives as clean markdown (Turndown) | **[verify in app]** |
-| **Price** | free, MIT | $49.99 |
+| **Themes** | six, including textured Cork and Steel (`ui.js:16-23`) | light / dark, invert in Preview |
+| **Version history** | local, time-stepped, word deltas per revision (`ui.js:931`) | none found in the bundle; relies on the OS |
+| **Style check** | every entry carries a `why` (`style-check.js:25`) | Fillers, Clichés, Redundancies, Custom; four languages; colours, no explanation |
+| **Paste a web page** | arrives as clean markdown (Turndown, `app.js:1696`) | no HTML-to-Markdown paste found in the bundle; iA ships a Shortcut, *Open Clipboard*, that does the conversion instead. Still worth one runtime check |
+| **Paste an image** | saved beside the document | content blocks, Library only |
+| **Wikilink safety** | a name can never become a path (`minimark.swift:5170`) | Library Paths, auth tokens for URL commands |
+| **Price** | free, MIT | $49.99 + subscription account system (`AccountKit.strings`) |
 
-The `why` on every style-check entry is the best single decision in minimark's
-codebase and iA does not have an equivalent. A highlight that will not say what
-is wrong with the sentence is just a colour, as the file says. Do not lose that
-when adding the lenses in 2.1: **the adverb lens must not gain a `why`**, because
-there is nothing wrong with an adverb. That is precisely the line between a lens
-and a critic, and it is worth writing into `style-check.js` as a comment before
-someone helpfully adds tooltips.
+The `why` on every style-check entry is still the best single decision in
+minimark's codebase. **The adverb lens must not gain a `why`**, because there
+is nothing wrong with an adverb. Write that into `style-check.js` as a comment.
 
 ---
 
 ## 4. Where minimark is actually behind
-
-Ranked by what it costs a writer, in the house style.
 
 **Tier 1, structural**
 
@@ -272,69 +276,209 @@ Ranked by what it costs a writer, in the house style.
 
 **Tier 2, daily friction**
 
-3. **No tags.** No way to gather notes across files without wikilinking each. (2.7)
-4. **Preview and export may not share a renderer.** **[verify in app]** (2.5)
-5. **No running heads or page numbers in PDF.** (2.5)
-6. **No lenses beyond the word lists.** (2.1)
+3. **No backlinks.** Wikilinks go one way. (8.1)
+4. **No tags.** (2.7)
+5. **No way to see the PDF before exporting it.** (2.5)
+6. **No running heads or page numbers in PDF.** (2.5)
+7. **No lenses beyond the word lists.** (2.1)
 
 **Tier 3, judgement calls**
 
-7. **Five fonts, defaulting to a proportional one.** (2.6)
-8. **No provenance for pasted text.** (2.3)
+8. **Five unrelated fonts, defaulting to a proportional one.** (2.6)
+9. **No provenance for pasted text.** (2.3)
 
 ---
 
 ## 5. What I would actually do, in order
 
-1. **Merge the three pickers into one `⌘K`.** Removes code, is the largest
-   coherence win, breaks no muscle memory if `⌘R` and `⌘F` pre-fill prefixes.
-2. **`![[file]]` transclusion.** One branch in the wikilink resolver. Unlocks
-   long-form writing, which is the only category minimark currently cannot serve.
-3. **Three lenses: adverbs, long sentences, repeated words.** Off by default,
-   no `why`, no counter, no badge. Existing sentence splitter, existing colours.
-4. **Hashtags into the merged picker.** Free organisation, zero sidebar.
-5. **Ship two templates and make Preview render through them.**
-6. **Change the default font to a duospace face, cut the list to three.**
-7. **Paste provenance in the history store**, one lens, nothing in the file.
+1. **Merge the three pickers into one `⌘K`.**
+2. **`![[file]]` transclusion**, allowing subfolders.
+3. **Backlinks in the picker** (8.1). Cheap once 1 exists.
+4. **Three lenses: adverbs, long sentences, repeated words.**
+5. **Hashtags and open tasks into the merged picker.**
+6. **Smart punctuation on output only** (8.3). One pass, zero risk to the file.
+7. **Header/footer/title page, and a PDF mode in Preview.**
+8. **Three faces of one family, mono-leaning default.**
+9. **Paste provenance in the history store.**
 
-1 through 4 are each small. Together they change what the app is for.
+1 through 5 are each small. Together they change what the app is for.
 
 ---
 
 ## 6. What to deliberately not copy
 
-- **A Library sidebar.** It is a second app. `⌘K` is the better answer and
-  minimark already made that argument in a code comment.
+- **A Library sidebar.** `⌘K` is the better answer, and minimark already made
+  that argument in a code comment (`ui.js:834`).
 - **Parts-of-speech colouring.** The refusal in `style-check.js:16` is right.
-  Take the framing, leave the parser.
-- **Authorship in the file.** The moment provenance is written into the `.md`,
-  minimark owns a format, and every other editor renders it as noise.
-- **Smart Folders.** Rules, persistence, and an empty state, in exchange for
-  something a saved search in the picker does at a tenth the cost.
-- **Six platforms.** iA's feature set is shaped by having to land everything on
-  iPhone, iPad, Mac, Windows and Android. minimark is one platform and should
-  spend that advantage rather than imitating the compromises it buys.
+- **Authorship in the file.** Now confirmed as iA's design, and confirmed as
+  costly: a misplaced-authorship detector, a CLI to preserve it, an in-app
+  prompt before enabling it per file.
+- **Smart Folders.** A saved search in the picker does it at a tenth the cost.
+- **Publishing to WordPress, Ghost, Medium, Micro.blog, Micropub.** Accounts,
+  OAuth, and five APIs to track forever. *Copy as HTML* (8.2) covers the need.
+- **An account and subscription system.** `AccountKit` handles trials,
+  device limits and release channels. Not a feature; noted because it is a
+  lot of the bundle.
+- **`single return starts a new paragraph`.** iA keeps it only for
+  compatibility and says so in the setting. Do not add a setting to be
+  incompatible with Markdown.
+- **Six platforms.** minimark is one platform and should spend that advantage.
 
 ---
 
-## 7. The seven things to verify with the app open
+## 7. The seven questions, answered
 
-1. Does Preview render through the same template as Print and PDF export?
-2. Where do Authorship annotations live: in the `.md`, or a sidecar?
-3. What is the actual measure in characters, and does it change with window size?
-4. Does pasting a web page produce markdown, or plain text?
-5. Is Syntax Control per-class toggleable, or one switch?
-6. What does the app do with a wikilink to a file that does not exist?
-   (minimark's known gap, item 10 in the polish audit.)
-7. How is Focus Mode's sentence detection handled at abbreviations and
-   decimals? minimark's `sentences()` (`app.js:1115`) will have the same
-   problem, and iA has had years to solve it.
+| # | Question | Answer | Source |
+|---|---|---|---|
+| 1 | Does Preview render through the same template as Print and PDF? | **No.** Separate template settings for *Web Preview* and *Printing & PDF Export*. Preview has a *PDF* display mode to show the print output. | `TemplatePreferences.nib`, `Kit.strings` |
+| 2 | Where do Authorship annotations live? | **At the end of the `.md` file**, hidden in iA, visible elsewhere. Edits by other apps trigger *Misplaced Authorship*. | `Kit.strings`, `Annotations.nib` |
+| 3 | What is the measure? | **A user setting, *Line length limit*, in characters.** The available values are not readable from the nib. | `EditorPreferences.nib` |
+| 4 | Does pasting a web page produce Markdown? | **Probably not by default.** No HTML-to-Markdown paste path in the strings; conversion is offered as a Shortcut instead. Needs one runtime check. | `Shortcuts.html` |
+| 5 | Is Syntax Control per class? | **Yes**, five independent toggles plus All / None / Last Used. | `Menu.nib`, `EditorPreferences.nib` |
+| 6 | Wikilink to a file that does not exist? | **Opens a new document with that name, ready to type**, no prompt. minimark offers the same but asks first (*Create “name.md”?*, `minimark.swift:5246-5256`), deliberately. Keep the prompt; a click should not write a file silently. | `Keyboard Shortcuts.html` |
+| 7 | Focus sentence detection at abbreviations and decimals? | **Still open.** Needs the running app. Test: `Dr. Smith paid $3.50 on 1.2.2026. Then left.` | — |
+
+---
+
+## 8. Further features worth cloning
+
+Found in pass 2 and not covered above. Each was checked against minimark's
+source; "absent" means a search of `app.js`, `ui.js` and `minimark.swift` found
+nothing. Grouped by fit with the thesis, then by cost.
+
+### 8.1 Linking
+
+- **Backlinks and potential backlinks.** iA lists files that link to this one,
+  and files that *mention its name without linking*. The second is the clever
+  half: it finds connections you forgot to make. For minimark it is a `⌘K`
+  section, "Links here", built by the shell scanning the folder (it already
+  owns the folder and batches existence checks, `minimark.swift:5209`).
+  Absent. **Cost: small. Fit: a lens on the folder.**
+- **Wikilink autocomplete on `[[`.** A list of matching files; `⏎` inserts and
+  moves past `]]`, `⇥` inserts and stays. Absent. **Cost: small** (the picker
+  already exists).
+- **Select text, press `[` twice to wrap it in `[[ ]]`.** minimark already
+  auto-pairs `[` (`app.js:2128`); this is one more case. **Cost: trivial.**
+- **Suffixes after the link:** `[[link]]s` renders as *links*. minimark's
+  tokenizer (`app.js:323`) would need to absorb trailing letters into the
+  label. **Cost: trivial.**
+- **Back and forward between documents, `⌃⌘←` / `⌃⌘→`.** Following wikilinks
+  without a way back is a one-way street. Absent. **Cost: small**, in the
+  shell.
+
+### 8.2 Editing
+
+- **Move line up/down, `⌥⌘↑` / `⌥⌘↓`.** Absent. **Cost: trivial.**
+- **Move caret by sentence, `⌥⌘←` / `⌥⌘→`**, with `⇧` to select. minimark
+  already knows where sentences are (`sentenceAt`, `app.js:1266`), so select
+  the sentence and delete it is two keys. Absent. **Cost: small.**
+- **Mark task complete, `⌥⌘X`**, and **completed tasks fade or strike
+  through** (a setting with two values). A lens on a task list. Absent.
+  **Cost: trivial.**
+- **Paste Edits From.** Paste a revised version of a passage over the
+  selection; only the changed words change, so undo is granular and history
+  shows a real diff. minimark already has a line differ for history
+  (`ui.js:1001`). **Cost: medium. Fit: very good** for anyone who edits
+  elsewhere and pastes back.
+- **Copy as HTML** beside *Copy as rich text* and *Copy as markdown*
+  (`ui.js:868-869`). This is iA's real answer to publishing. Absent.
+  **Cost: trivial.**
+- **Make Title Case.** One command. **Cost: trivial.**
+- **Read aloud** (*Start Speaking*). Hearing a draft catches what reading does
+  not. `NSSpeechSynthesizer` from the shell, speaking the selection or the
+  focused paragraph. Absent. **Cost: small. Fit: a lens for the ear.**
+
+### 8.3 Output
+
+- **Smart punctuation on output only.** *"Convert straight quotes and plain
+  dashes into smart counterparts for all formatted output."* The source keeps
+  `"` and `--`; Preview, PDF and HTML get `“ ”` and `—`. This is the thesis in
+  one setting: the file stays plain, the page is typeset. Absent. **Cost:
+  small** (a `marked` post-pass that skips code). **Do this one.**
+- **Metadata variables.** Front matter `Author: Jane` plus `[%Author]` in the
+  text, substituted in Preview and export. Global defaults in settings,
+  document values override, content-block values override both. minimark
+  already parses front matter into a card. Absent. **Cost: small.** Useful for
+  letters and templates, and it feeds headers/footers (2.5).
+- **Page break `+++`** for PDF and print. Absent. **Cost: trivial** (a
+  `break-after: page` div).
+- **Table of contents block.** iA has *Add Table of Contents*; minimark
+  already builds the heading list for `⌘R`. Absent. **Cost: small.**
+- **Highlight `==text==`**, **superscript `^`**, **subscript `~`**. Absent
+  (minimark has footnotes `app.js:658` and definition lists `app.js:616`).
+  **Cost: trivial each.** Highlight is the one people use.
+- **Citations** `[p. 23][#Doe:2006]`, rendered as endnotes. **Cost: medium.**
+  Only if minimark targets academic writing.
+- **Output rules for private syntax.** Wikilinks export as plain text
+  (*"connections hidden from everyone else"*), hashtags as span, text, or
+  removed. A note's scaffolding should not leak into the published page.
+  **Cost: trivial. Fit: exact.**
+- **Project archive export**: a zip with every transcluded file. Only matters
+  after 2.2. **Cost: small.**
+
+### 8.4 Stats
+
+- iA offers: characters, characters without spaces, words, **sentences**,
+  **reading time**, **speaking time**, **tasks (done / total)**, and a
+  *Stats Only* status bar. minimark cycles words, characters and reading time
+  (`app.js:988-1000`). Worth adding: **tasks 3/7** (turns a checklist into
+  progress) and **speaking time** (for talks). **Cost: trivial.**
+- **Stats for the selection.** Not confirmed in the bundle; common enough to
+  be worth doing regardless. **Cost: trivial.**
+
+### 8.5 Style check
+
+- **Custom patterns.** A user list of words to dim and strike, with context
+  (`custom ~~filler~~` only flags *filler* after *custom*), exceptions
+  (`-pattern` switches a built-in off), and a safe regex subset. minimark's
+  version keeps its principle: **a custom pattern's `why` is whatever the user
+  writes beside it**, so every highlight can still explain itself.
+  **Cost: medium.**
+- **Clichés** as a category, beside fillers and redundancies. Worth checking
+  against minimark's current lists. **Cost: small** (content, not code).
+
+### 8.6 Automation
+
+- **A URL scheme**: `minimark://open?path=`, `new?text=`, and
+  `add?path=&text=` (append a line, a sentence or a paragraph). Gives
+  Shortcuts, Raycast and Alfred a way in: *add to diary with today's date* is
+  one shortcut. iA's `add` padding modes (`sentence`, `line`, `paragraph`) are
+  the part worth copying exactly. **Cost: small** in Swift. Auth is needed only
+  for commands that read data back; minimark could simply not have those.
+- **A `minimark` CLI.** iA added one in 8.0.5 for coding agents. For minimark,
+  `minimark open file.md` via the URL scheme is enough. **Cost: trivial after
+  the URL scheme.**
+
+### 8.7 Windows and tabs (relevant to the `tabs` branch)
+
+- iA uses **native macOS tabs**: *New Tab*, *Show Tab Bar*, *Show All Tabs*
+  (tab overview). minimark currently sets `tabbingMode = .disallowed`
+  (`minimark.swift:2283`). Worth checking whether the tabs work can lean on
+  `NSWindow` tabbing for the tab bar and overview for free.
+- **External change while editing**: iA offers *Keep iA Writer Version*,
+  *Revert*, *Save As*. minimark already reloads and has careful conflict
+  handling (`minimark.swift:956-1116`); the three-button choice is a UI worth
+  comparing against when both sides changed.
+
+### 8.8 Seen and declined
+
+Emphasis marks and CJK typesetting traditions (right for iA's market, not
+minimark's yet), Word `.docx` export (expensive; HTML covers most of it),
+Library Locations and `[[Location: link]]` (needs the Library), Smart Folder
+query language (needs the Library), dock icon appearance, three-finger swipe
+to show panes, auth-token-protected URL reads.
 
 ---
 
 ## Sources
 
-Secondhand, since `ia.net` was unreachable from this session.
+**Pass 2, first-hand** (iA Writer 8.0.6, build 80046, `pro.writer.mac`):
+`Contents/Resources/Base.lproj/Help/*.html`, `Base.lproj/News/*.html`,
+`en.lproj/*.strings`, `Base.lproj/*.nib`,
+`Frameworks/{Kit,Markdown,TypographyKit,Commands}.framework/Resources/*.strings`,
+`Resources/Templates/*.iatemplate`, `MacOS/writer --help`.
+
+**Pass 1, secondhand:**
 
 - [Features, iA Writer support](https://ia.net/writer/support/basics/features)
 - [Syntax Highlight, iA Writer support](https://ia.net/writer/support/editor/syntax-highlight)
