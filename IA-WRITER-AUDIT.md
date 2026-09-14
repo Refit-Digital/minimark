@@ -139,30 +139,41 @@ and every other editor renders the annotations as garbage.
 field, `⇧⌘O`, that reaches headings, filenames, and full text at once. The
 command palette stayed separate at `⇧⌘P`.
 
-**Why it matters here.** minimark currently has **three** finder surfaces built
-on the same picker widget:
+**Why it matters here.** minimark had **three** finder surfaces. Two of them
+were the same widget twice:
 
-| Surface | Key | Code |
+| Surface | Key | Was |
 |---|---|---|
-| Command palette | `⌘K` | `openPalette` (`ui.js:907`) |
-| Jump to heading | `⌘R` | `openHeadings` (`ui.js:899`) |
-| Find and replace | `⌘F` | `openFind` (`ui.js:1398`) |
+| Command palette | `⌘K` | `openPalette`, via `openPicker` |
+| Jump to heading | `⌘R` | `openHeadings`, via `openPicker` |
+| Find and replace | `⌘F` | `openFind`, its own bar |
 
-They share `openPicker` (`ui.js:793`) and the same fuzzy `score` (`ui.js:759`).
-Three keys, one mechanism, and the user has to know in advance which of three
-things they are looking for before they can start typing. Recents are already
-mixed into the palette (`recentItems`, `ui.js:828`) with the right instinct
-behind it, quoted in the comment there.
+**Correction to an earlier draft of this document**, which claimed all three
+shared the picker. They do not, and the difference decides the design. Find is
+not a list: it paints every match in both views at once, steps through them,
+replaces, and tears its highlight layers down on a view switch. Absorbing it
+into a results list would have cost all of that. It is a genuinely different
+interaction that happens to start with typing.
 
-**Verdict: merge, and go further than iA did.** One field, `⌘K`, everything in
-it: commands, headings, recents, wikilink targets, and literal text matches in
-the current document. Prefix sigils for people who want to narrow (`>` command,
-`#` heading, `/` file), the way every good palette does it. `⌘R` and `⌘F` stay
-as direct shortcuts into the same field with the prefix pre-filled, so no muscle
-memory breaks.
+**Verdict: merge the two that are the same, reach the third.** Shipped:
 
-This is the most coherent thing on the list and it removes code rather than
-adding it.
+- One field on `⌘K` holding commands, the document's headings, and recent
+  files, competing on one score.
+- Sigils to narrow: `>` commands, `#` headings, `/` files. One character, and
+  nothing lost by never learning them.
+- `⌘R` opens the same field with `#` already typed, so the outline shortcut
+  still lands on the outline.
+- Find stays its own bar. Typing two or more characters offers `Find "…" in
+  this document` as the **last** result, which hands the query to the find bar.
+  The one field reaches it without pretending to be it.
+- Empty field opens on the document's headings rather than the head of the
+  command list, because where you are is more useful than what you could do.
+
+No group headers in the list: a heading already carries its level, a recent file
+already carries the word Recent, and a command already carries its shortcut.
+Labels on top of that would be chrome describing chrome.
+
+Net 100 lines added, 24 removed, and one concept removed.
 
 ### 2.5 Templates as bundles
 
@@ -268,7 +279,7 @@ Ranked by what it costs a writer, in the house style.
 **Tier 1, structural**
 
 1. **No transclusion.** You cannot write anything longer than one file. (2.2)
-2. **Three search surfaces where one belongs.** (2.4)
+2. ~~Three search surfaces where one belongs.~~ Done. (2.4)
 
 **Tier 2, daily friction**
 
@@ -286,8 +297,9 @@ Ranked by what it costs a writer, in the house style.
 
 ## 5. What I would actually do, in order
 
-1. **Merge the three pickers into one `⌘K`.** Removes code, is the largest
-   coherence win, breaks no muscle memory if `⌘R` and `⌘F` pre-fill prefixes.
+1. ~~**Merge the three pickers into one `⌘K`.**~~ **Done.** Commands, headings
+   and recents in one field, sigils to narrow, find reached by handoff rather
+   than absorbed. See §2.4 for what changed from the plan and why.
 2. **`![[file]]` transclusion.** One branch in the wikilink resolver. Unlocks
    long-form writing, which is the only category minimark currently cannot serve.
 3. **Three lenses: adverbs, long sentences, repeated words.** Off by default,

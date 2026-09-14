@@ -751,10 +751,37 @@
   };
 
   /* ============================================================
-     PICKER (command palette + heading jump)
+     PICKER — one field for everything
+
+     Commands, the document's own headings and the recent files arrive here
+     together and compete on score. Three keys opening three lists asked the
+     writer to know which list held the thing before they could look for it,
+     which is the search they came here to avoid doing.
+
+     A leading sigil narrows to one kind, for anyone who already knows:
+     `>` commands, `#` headings, `/` files. It costs one character, and
+     costs nothing to ignore.
+
+     Find is the one thing deliberately not absorbed. It is a bar, not a
+     list: it paints every match at once, steps through them, and replaces.
+     Typing here offers it as the last result and hands the query over, so
+     the one field still reaches it without pretending to be it.
      ============================================================ */
   var pickerWrap = $('#pickerWrap'), pickerInput = $('#pickerInput'), pickerList = $('#pickerList');
   var pk = { items: [], filtered: [], sel: 0, open: false };
+
+  var SIGILS = { '>': 'command', '#': 'heading', '/': 'file' };
+
+  /* Also the tie-break when two items score alike, which is every item while
+     the field is empty: opening on the document's own shape says more about
+     where you are than the head of the command list does. */
+  var GROUP_RANK = { heading: 0, command: 1, file: 2 };
+
+  function parseQuery(raw) {
+    var s = raw.replace(/^\s+/, '');
+    var group = SIGILS[s.charAt(0)] || null;
+    return { group: group, q: (group ? s.slice(1) : s).trim() };
+  }
 
   function score(hay, needle) {
     if (!needle) return 1;
@@ -771,16 +798,34 @@
     return s;
   }
 
+  /* No group headings in the list: the rows already say what they are. A
+     heading carries its level, a recent file carries the word Recent, and a
+     command carries its shortcut or its hint. Labels on top of that would be
+     chrome describing chrome. */
   function renderPicker() {
-    var q = pickerInput.value.trim();
+    var pq = parseQuery(pickerInput.value);
     pk.filtered = pk.items
-      .map(function (it) { return { it: it, s: score(it.title + ' ' + (it.hint || ''), q) }; })
+      .filter(function (it) { return !pq.group || it.group === pq.group; })
+      .map(function (it, n) { return { it: it, n: n, s: score(it.title + ' ' + (it.hint || ''), pq.q) }; })
       .filter(function (x) { return x.s > 0; })
-      .sort(function (a, b) { return b.s - a.s; })
+      .sort(function (a, b) {
+        return (b.s - a.s) ||
+               ((GROUP_RANK[a.it.group] || 0) - (GROUP_RANK[b.it.group] || 0)) ||
+               (a.n - b.n);
+      })
       .map(function (x) { return x.it; })
-      .slice(0, 60);
+      .slice(0, 80);
+
+    /* appended after the sort, so handing off to find never takes the
+       selection off a real result */
+    if (!pq.group && pq.q.length > 1) pk.filtered.push(findItem(pq.q));
+
     if (pk.sel >= pk.filtered.length) pk.sel = 0;
-    if (!pk.filtered.length) { pickerList.innerHTML = '<div class="pk-empty">Nothing found</div>'; return; }
+    if (!pk.filtered.length) {
+      pickerList.innerHTML = '<div class="pk-empty">' +
+        (pq.group === 'heading' ? 'No headings in this document' : 'Nothing found') + '</div>';
+      return;
+    }
     pickerList.innerHTML = pk.filtered.map(function (it, i) {
       return '<div class="pk' + (i === pk.sel ? ' sel' : '') + '" data-i="' + i + '">' +
         (it.level ? '<span class="pk-h">H' + it.level + '</span>' : '') +
@@ -790,9 +835,19 @@
     }).join('');
   }
 
-  function openPicker(items, placeholder) {
+  function findItem(q) {
+    return {
+      title: 'Find “' + q + '” in this document',
+      hint: 'search text replace',
+      key: '⌘F',
+      run: function () { openFind(q); }
+    };
+  }
+
+  function openPicker(items, placeholder, prefill) {
     pk.items = items; pk.sel = 0; pk.open = true;
-    pickerInput.value = ''; pickerInput.placeholder = placeholder || 'Type a command';
+    pickerInput.value = prefill || '';
+    pickerInput.placeholder = placeholder || 'Type a command';
     renderPicker();
     pickerWrap.classList.add('open');
     setTimeout(function () { pickerInput.focus(); }, 30);
@@ -834,6 +889,7 @@
   function recentItems() {
     return recents.map(function (r) {
       return {
+        group: 'file',
         title: r.name,
         hint: 'open recent document file',
         key: 'Recent',
@@ -862,7 +918,7 @@
       { title: 'Bigger text', key: '⌘+', run: function () { stepSize(1); } },
       { title: 'Smaller text', key: '⌘-', run: function () { stepSize(-1); } },
       { title: 'Reset text size', key: '⌘0', run: function () { setSize(SIZE_DEFAULT); } },
-      { title: 'Jump to heading…', key: '⌘R', run: openHeadings },
+      { title: 'Jump to heading…', key: '⌘R', hint: 'outline # headings', run: openHeadings },
       { title: 'Find and replace', key: '⌘F', run: openFind },
       { title: 'Markdown reference', key: '⌘/', run: openHelp },
       { title: 'Copy document as rich text', key: '⌥⌘C', run: MM.copyRich },
@@ -883,7 +939,9 @@
       { title: 'Insert horizontal rule', run: function () { insertSnippet('---'); } },
       { title: 'Insert today’s date', run: function () { insertSnippet(new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })); } },
       { title: 'Insert front matter', run: function () { insertFrontMatter(); } }
-    ].concat(recentItems()).concat(t);
+    ].concat(t)
+     .map(function (it) { it.group = 'command'; return it; })
+     .concat(recentItems());
   }
 
   function insertSnippet(text) {
@@ -896,15 +954,26 @@
     MM.setText(fm + state.text, { immediate: true });
   }
 
-  function openHeadings() {
-    var hs = headings();
-    if (!hs.length) { toast('No headings yet'); return; }
-    openPicker(hs.map(function (h) {
-      return { title: h.text || '(untitled)', level: h.level, run: function () { jumpToBlock(h.i); } };
-    }), 'Jump to heading');
+  function headingItems() {
+    return headings().map(function (h) {
+      return {
+        group: 'heading',
+        title: h.text || '(untitled)',
+        level: h.level,
+        run: function () { jumpToBlock(h.i); }
+      };
+    });
   }
 
-  function openPalette() { openPicker(commandItems(), 'Type a command'); }
+  function allItems() { return headingItems().concat(commandItems()); }
+
+  var PICKER_HINT = 'Search commands, headings and files';
+
+  /* Both keys open the same field. ⌘R only arrives with the sigil already
+     typed, so the shortcut people have in their fingers still goes straight to
+     the outline. */
+  function openPalette() { openPicker(allItems(), PICKER_HINT); }
+  function openHeadings() { openPicker(allItems(), PICKER_HINT, '#'); }
 
   /* ============================================================
      WINDOW DRAG STRIP
@@ -1395,11 +1464,17 @@
     revealMatch();
   }
 
-  function openFind() {
+  /* `seed` is the picker handing its query over. Guarded on the type because
+     this is also MM.menu.find, which the shell calls with what it likes. */
+  function openFind(seed) {
     fx.open = true; find.classList.add('open');
-    var ta = MM.activeTextarea();
-    if (ta && ta.selectionStart !== ta.selectionEnd) {
-      findInput.value = ta.value.slice(ta.selectionStart, ta.selectionEnd).split('\n')[0];
+    if (typeof seed === 'string' && seed) {
+      findInput.value = seed;
+    } else {
+      var ta = MM.activeTextarea();
+      if (ta && ta.selectionStart !== ta.selectionEnd) {
+        findInput.value = ta.value.slice(ta.selectionStart, ta.selectionEnd).split('\n')[0];
+      }
     }
     /* a block open for editing hides its rendered text behind a textarea, and
        there is nothing to mark inside one — put it back before searching */
@@ -2493,13 +2568,14 @@
     '',
     '## Getting around',
     '',
-    'Press `⌘K` for the command palette. Everything lives in there, so nothing',
-    'needs to live on the toolbar.',
+    'Press `⌘K`. Commands, this document’s headings and your recent files are',
+    'all in the one field. Narrow it with a leading `>` for commands, `#` for',
+    'headings or `/` for files, or type and let them compete.',
     '',
     '| Key | Does |',
     '| --- | --- |',
-    '| ⌘K | Command palette |',
-    '| ⌘R | Jump to a heading |',
+    '| ⌘K | Search everything |',
+    '| ⌘R | The same field, on this document’s headings |',
     '| ⌘F | Find and replace |',
     '| ⌃⌥Z | Zen mode |',
     '| ⌘⇧D | Focus mode |',
