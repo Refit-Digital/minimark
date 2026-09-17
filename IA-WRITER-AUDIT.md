@@ -118,16 +118,44 @@ quotes after it.
   `Width`, `Height`; after a text block they set variables for that inclusion
   only (§8, metadata variables).
 
-**Verdict: take it, as `![[chapter-two]]`.** One branch in the wikilink
-resolver. **One constraint to decide first:** minimark's wikilinks resolve only
-to a file *in the same folder* (`minimark.swift:5166-5197`, deliberately: a
-document may not name a path). iA resolves nearest-first: same folder, then
-subfolders, then parents. A manuscript usually wants `chapters/` beside
-`book.md`. Allowing descent into subfolders (never `..`, never absolute) keeps
-the security property and makes transclusion useful for books.
+**Done**, as `![[chapter-two]]`. Shipped on this branch:
 
-This is still the single highest-value item. It is the difference between an
-editor for notes and an editor for a manuscript.
+- **Block level, on a line of its own.** A line with an embed and prose on it
+  is prose, and keeps rendering as it does today.
+- **Markdown, text, CSV and images.** A CSV becomes a table, parsed properly
+  (quoted commas, doubled quotes, newlines inside cells), and iA's
+  fewer-than-two-rows error is taken as written. An image needs no round trip:
+  it is a `src`, resolved against the document's folder the way `![](…)`
+  already is.
+- **`![[name|A caption]]`** draws the caption under it.
+- **Descent allowed, as argued below.** `wikiURL` now takes `chapters/one`.
+  It still refuses `..` in any position, a leading `/` or `~`, a dotfile at any
+  depth, a colon or backslash, more than sixteen components, and anything that
+  leaves the tree **by following a symlink** — that last one is new, and is
+  what widening the rule makes worth planting. The containment check resolves
+  symlinks on both sides before comparing, which `standardizedFileURL` alone
+  does not.
+- **One round trip a render**, batched and cached per folder, the same shape as
+  the wikilink existence check it sits beside. What is cached is the rendered
+  node, not the file's text, so a long chapter is not re-parsed every keystroke.
+- **Every failure names the file and the reason** (missing, unreadable,
+  too-big, outside the folder, wrong kind, thin CSV), rather than leaving a
+  placeholder that could also mean "still loading".
+
+**One deliberate limit: embeds go one level deep.** An embed inside an embedded
+file is replaced with a note saying so. That makes a cycle impossible by
+construction rather than by a guard someone has to keep correct, and a
+manuscript embedding its chapters is one level, which is the case this is for.
+iA instead nests and ignores recursion; if minimark ever wants that, the note
+is where to start.
+
+**Known gap:** an embedded file edited in another window does not refresh until
+the folder changes or a wikilink creates a file. minimark watches the document's
+own file, not its embeds. Worth a pass when the file-coordination work in the
+polish audit happens, since that is the same machinery.
+
+37 assertions in `tools/embed-test.js` for the web layer, 24 in
+`tools/embed-path-test.js` for the Swift resolver.
 
 ### 2.3 Authorship: what did you actually write
 
@@ -297,7 +325,7 @@ is nothing wrong with an adverb. Write that into `style-check.js` as a comment.
 
 **Tier 1, structural**
 
-1. **No transclusion.** You cannot write anything longer than one file. (2.2)
+1. ~~No transclusion.~~ **Done.** (2.2)
 2. ~~Three search surfaces where one belongs.~~ **Done.** (2.4)
 
 **Tier 2, daily friction**
@@ -319,7 +347,8 @@ is nothing wrong with an adverb. Write that into `style-check.js` as a comment.
 
 1. ~~**Merge the three pickers into one `⌘K`.**~~ **Done.** See §2.4 for what
    changed from the plan and why.
-2. **`![[file]]` transclusion**, allowing subfolders.
+2. ~~**`![[file]]` transclusion**, allowing subfolders.~~ **Done.** See §2.2,
+   including the one-level limit and the refresh gap.
 3. **Backlinks in the picker** (8.1). Cheap once 1 exists.
 4. **Three lenses: adverbs, long sentences, repeated words.**
 5. **Hashtags and open tasks into the merged picker.**

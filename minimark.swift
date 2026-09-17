@@ -73,6 +73,12 @@ let kMaxRestoredTabs = 24
 /// distinct links than this is not a document anybody is reading; the cap is
 /// there so a pasted wall of [[...]] cannot make the app stat for a second.
 let kMaxWikiCheck = 400
+/// How many embedded files one render may read, and how large each may be.
+/// Reading is the expensive half — a check is a stat, an embed is the whole
+/// file — so this is far smaller than the check cap and the size is capped too.
+/// A chapter is tens of kilobytes; a megabyte is somebody embedding a log.
+let kMaxEmbedRead = 32
+let kMaxEmbedBytes = 1 << 20
 /// How long the launch waits for the history sidecar before showing documents
 /// without it. Generous — it is a single file read on a warm cache almost
 /// always — because losing this race costs the session's history, and only a
@@ -2591,6 +2597,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
         case "wikiCheck":
             if let names = body["names"] as? [String] { answerWikiCheck(names) }
+
+        case "embedRead":
+            if let names = body["names"] as? [String] { answerEmbedRead(names) }
 
         case "histWrite":
             // An empty payload would truncate the sidecar to nothing, and load()
@@ -5175,25 +5184,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     // path for the app to open.
     // ------------------------------------------------------------------
 
-    /// The file a wikilink names, or nil if the name is not one this will
-    /// touch. `.md` is added when there is no extension, which is what makes
-    /// [[Another note]] rather than [[Another note.md]] the thing people write.
+    /// The file a wikilink or an embed names, or nil if the name is not one
+    /// this will touch. `.md` is added when there is no extension, which is
+    /// what makes [[Another note]] rather than [[Another note.md]] the thing
+    /// people write.
+    ///
+    /// A name may now descend: `chapters/one` resolves, because a manuscript
+    /// keeps its chapters in a folder beside the book and an embed that cannot
+    /// reach them is an embed nobody can write a book with. It may not climb,
+    /// and it may not start anywhere but here — no leading slash, no `..`, no
+    /// `~`, and no component that begins with a dot.
+    ///
+    /// The containment check afterwards is the one that actually decides, and
+    /// it resolves symlinks on both sides before comparing. Widening the rule
+    /// from one folder to a tree is exactly what makes a symlink out of that
+    /// tree worth planting, and `standardizedFileURL` does not follow one.
     func wikiURL(_ raw: String) -> URL? {
         let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty, name.count < 256,
-              !name.hasPrefix("."),                        // .hidden, and ".." with it
-              !name.contains("/"), !name.contains(":"),    // path separators, both of them
+        guard !name.isEmpty, name.count < 1024,
+              !name.hasPrefix("/"), !name.hasPrefix("~"),
+              !name.contains(":"),                         // the other path separator
               !name.contains("\0"),
+              !name.contains("\\"),
               let dir = docURL?.deletingLastPathComponent()
         else { return nil }
 
+        // Every component in its own right: "." and ".." are refused wherever
+        // they appear, not only at the front, and a dotfile stays unreachable
+        // at any depth.
+        let parts = name.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count <= 16 else { return nil }
+        for part in parts {
+            guard !part.isEmpty, !part.hasPrefix("."), part.count < 256 else { return nil }
+        }
+
         var file = name
         if (name as NSString).pathExtension.isEmpty { file += ".md" }
+
+        let base = dir.resolvingSymlinksInPath().standardizedFileURL
         let url = dir.appendingPathComponent(file).standardizedFileURL
-        // The belt to the braces above: whatever the name was, the answer has
-        // to be a file sitting directly in this document's folder.
-        guard url.deletingLastPathComponent().standardizedFileURL.path
-                == dir.standardizedFileURL.path else { return nil }
+        // Resolve what exists of the answer before comparing. A file that is
+        // not there yet resolves to itself, which is what a wikilink about to
+        // create one needs.
+        let real = url.resolvingSymlinksInPath().standardizedFileURL
+        guard real.path == base.path || real.path.hasPrefix(base.path + "/") else { return nil }
         return url
     }
 
@@ -5220,6 +5254,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         guard let data = try? JSONSerialization.data(withJSONObject: out, options: []),
               let json = String(data: data, encoding: .utf8) else { return }
         js("if(window.App&&App.setWikiTargets)App.setWikiTargets(\(json))")
+    }
+
+    /// The text behind each embedded name. One reply per batch, like the
+    /// check above, and for the same reason.
+    ///
+    /// Every failure answers with a reason rather than being left out. An
+    /// embed that says nothing at all is indistinguishable from one still on
+    /// its way, and the writer is left looking at a placeholder forever.
+    func answerEmbedRead(_ names: [String]) {
+        let batch = names.prefix(kMaxEmbedRead)
+        guard !batch.isEmpty else { return }
+        let fm = FileManager.default
+        var out: [String: [String: Any]] = [:]
+
+        for name in batch {
+            guard let url = wikiURL(name) else { out[name] = ["error": "outside"]; continue }
+
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue else {
+                out[name] = ["error": "missing"]; continue
+            }
+            // Asked before reading, so a video somebody dropped in the folder
+            // is refused rather than pulled into memory to be refused.
+            if let attrs = try? fm.attributesOfItem(atPath: url.path),
+               let size = attrs[.size] as? Int, size > kMaxEmbedBytes {
+                out[name] = ["error": "too-big"]; continue
+            }
+
+            // The document's own decoder, so an embedded file in Latin-1 reads
+            // as it would in a tab, and a binary one is refused by the same
+            // check that stops a tab opening it. Uncoordinated, unlike a tab:
+            // this is a read of somebody else's file on the render path, and a
+            // file coordinator's wait belongs nowhere near that. The worst a
+            // torn read costs here is one stale embed until the next render.
+            guard let text = decodeTextFile(url)?.text else {
+                out[name] = ["error": "unreadable"]; continue
+            }
+            out[name] = ["text": text]
+        }
+
+        guard let data = try? JSONSerialization.data(withJSONObject: out, options: []),
+              let json = String(data: data, encoding: .utf8) else { return }
+        js("if(window.App&&App.setEmbeds)App.setEmbeds(\(json))")
     }
 
     func openWikilink(_ name: String) {
@@ -5250,7 +5327,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         // to do on the strength of one click.
         let alert = NSAlert()
         alert.messageText = "Create “\(url.lastPathComponent)”?"
-        alert.informativeText = "There is no file by that name in this folder yet."
+        alert.informativeText = url.deletingLastPathComponent().path
+            == docURL?.deletingLastPathComponent().path
+            ? "There is no file by that name in this folder yet."
+            : "There is no file by that name in “\(url.deletingLastPathComponent().lastPathComponent)” yet. "
+              + "That folder has to exist already."
         alert.addButton(withTitle: "Create")
         alert.addButton(withTitle: "Cancel")
         let make: (NSApplication.ModalResponse) -> Void = { [weak self] response in
@@ -5271,9 +5352,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                     return
                 }
                 // Every document holding a link to this name has just stopped
-                // being wrong about it. The answers are cached per folder in
-                // the page, so they have to be dropped rather than waited out.
+                // being wrong about it, and so has every embed of it. Both are
+                // cached per folder in the page, so both have to be dropped
+                // rather than waited out.
                 self.js("if(window.App&&App.forgetWikiTargets)App.forgetWikiTargets()")
+                self.js("if(window.App&&App.forgetEmbeds)App.forgetEmbeds()")
                 self.openDocument(at: url)
             })
         }

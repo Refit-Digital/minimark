@@ -352,6 +352,17 @@
       ['<https://url>', '<https://example.com>'],
       ['![alt](picture.png)', null, '<em>alt</em> → embedded image']
     ]],
+    /* Described rather than rendered. Every other row is run through MM.md so
+       the sheet cannot drift from the parser, but an embed row rendered live
+       would send the shell a round trip asking for a file called "note". */
+    ['Your own files', [
+      ['[[Another note]]', null, 'link to a file beside this one'],
+      ['[[Another note|called this]]', null, 'the same link, named'],
+      ['![[Another note]]', null, 'on its own line: pull that file in here'],
+      ['![[chapters/one]]', null, 'a subfolder works too'],
+      ['![[figures.csv]]', null, 'a CSV arrives as a table'],
+      ['![[note|A caption]]', null, 'caption under the embed']
+    ]],
     ['Code & tables', [
       ['```js\ncode block\n```', '```\ncode block\n```'],
       ['| A | B |\n|---|---|\n| 1 | 2 |', '| A | B |\n|---|---|\n| 1 | 2 |']
@@ -2393,6 +2404,12 @@
     /* A wikilink has just created the file it named, so every cached answer
        about this folder is one render out of date. */
     forgetWikiTargets: function () { MM.forgetWikiTargets(); },
+    /* The text behind each ![[embed]] the page asked for, as
+       { name: { text } | { error } }. Same batching as the wikilinks above,
+       and the same reason: one round trip a render, not one an embed. */
+    setEmbeds: function (map) { MM.setEmbeds(map); },
+    /* An embedded file has appeared, or the folder moved. */
+    forgetEmbeds: function () { MM.forgetEmbeds(); },
     /* The version history store, read back from its sidecar file at launch.
        Separate from setPrefs because it is a document store, not a setting:
        it is large, it arrives on its own schedule, and a failure to parse it

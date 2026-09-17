@@ -366,6 +366,262 @@ window.MM = (function () {
     }]
   });
 
+  /* ---------------- embeds ----------------
+     ![[chapter-two]] on a line of its own pulls that file in where it stands.
+
+     Block level, not inline, because an embed is a block: a line with an
+     embed and prose on it is a line the writer meant as prose, and it keeps
+     rendering as it does today.
+
+     The extension only marks the place. What goes in it arrives later, from
+     the shell, the same way a wikilink's existence does — which is what keeps
+     the source and the rendered blocks one to one. Splicing the file's text
+     into the document before parsing would be less code and would move every
+     block index after it, and live view maps blocks back to source offsets.
+
+     Nesting is deliberately one level. An embed inside an embedded file is
+     replaced with a note saying so rather than resolved, which makes a cycle
+     impossible by construction instead of by a guard somebody has to keep
+     correct. A manuscript embedding its chapters is one level; that is the
+     case this is for. */
+  var EMBED = /^!\[\[([^\[\]|\n]+?)(?:\|([^\[\]\n]*))?\]\][ \t]*(?:\n|$)/;
+
+  marked.use({
+    extensions: [{
+      name: 'embed',
+      level: 'block',
+      start: function (src) { var i = src.indexOf('![['); return i < 0 ? undefined : i; },
+      tokenizer: function (src) {
+        var m = EMBED.exec(src);
+        if (!m) return;
+        var target = m[1].trim();
+        if (!target) return;
+        return {
+          type: 'embed', raw: m[0],
+          target: target,
+          caption: (m[2] == null ? '' : m[2].trim())
+        };
+      },
+      renderer: function (t) {
+        return '<figure class="embed" data-embed="' + esc(t.target) + '">' +
+               '<div class="embed-body"><p class="embed-wait">' + esc(t.target) + '</p></div>' +
+               (t.caption ? '<figcaption>' + esc(t.caption) + '</figcaption>' : '') +
+               '</figure>';
+      }
+    }]
+  });
+
+  var EMBED_IMG  = /\.(?:png|jpe?g|gif|webp|avif|bmp|svg)$/i;
+  var EMBED_TEXT = /\.(?:md|markdown|txt|text)$/i;
+  var EMBED_CSV  = /\.csv$/i;
+
+  /* No extension means markdown, which is the same rule the shell applies
+     when it turns a wikilink name into a file. */
+  function embedKind(name) {
+    if (EMBED_IMG.test(name)) return 'image';
+    if (EMBED_CSV.test(name)) return 'csv';
+    if (EMBED_TEXT.test(name)) return 'text';
+    return /\.[a-z0-9]+$/i.test(name) ? 'other' : 'text';
+  }
+
+  var EMBED_ERRORS = {
+    missing:    'There is no file called \u201c%\u201d here.',
+    unreadable: '\u201c%\u201d could not be read as text.',
+    'too-big':  '\u201c%\u201d is too large to embed.',
+    outside:    '\u201c%\u201d is outside this document\u2019s folder.',
+    other:      'minimark embeds markdown, text, CSV and images. \u201c%\u201d is none of those.',
+    'thin-csv': '\u201c%\u201d needs a header row and at least one row under it.'
+  };
+
+  function embedError(name, code) {
+    var t = EMBED_ERRORS[code] || EMBED_ERRORS.missing;
+    var p = document.createElement('p');
+    p.className = 'embed-error';
+    p.textContent = t.replace('%', name);
+    return p;
+  }
+
+  /* An embedded file is rendered the way the document itself is, through the
+     same parser and the same sanitiser, because it is the same kind of thing
+     and holding it to a weaker standard would be the hole.
+
+     Nested embeds are unpicked afterwards rather than stripped from the text
+     first. marked has already decided by then what was inside a fence, so an
+     ![[example]] written *about* embeds inside a code block stays what the
+     writer typed, which a regex pass over the source gets wrong. */
+  function renderEmbedded(text) {
+    var box = document.createElement('div');
+    try { box.innerHTML = clean(marked.parse(String(text))); }
+    catch (e) { return null; }
+    var nested = box.querySelectorAll('figure.embed[data-embed]');
+    for (var i = 0; i < nested.length; i++) {
+      var f = nested[i];
+      var note = document.createElement('p');
+      note.className = 'embed-nested';
+      var code = document.createElement('code');
+      code.textContent = '![[' + f.getAttribute('data-embed') + ']]';
+      note.appendChild(code);
+      note.appendChild(document.createTextNode(' is not expanded here. Embeds go one level deep.'));
+      f.parentNode.replaceChild(note, f);
+    }
+    return box;
+  }
+
+  /* Quotes, doubled quotes inside them, and commas and newlines inside those.
+     Anything less is a split on commas wearing a parser's name, and the first
+     address column in somebody's spreadsheet finds it. */
+  function parseCSV(text) {
+    var rows = [], row = [], field = '', quoted = false, i = 0;
+    var src = String(text).replace(/\r\n?/g, '\n');
+    for (; i < src.length; i++) {
+      var c = src.charAt(i);
+      if (quoted) {
+        if (c !== '"') { field += c; continue; }
+        if (src.charAt(i + 1) === '"') { field += '"'; i++; continue; }
+        quoted = false;
+      } else if (c === '"' && field === '') {
+        quoted = true;
+      } else if (c === ',') {
+        row.push(field); field = '';
+      } else if (c === '\n') {
+        row.push(field); field = ''; rows.push(row); row = [];
+      } else {
+        field += c;
+      }
+    }
+    if (field !== '' || row.length) { row.push(field); rows.push(row); }
+    /* a trailing newline is punctuation, not an empty record */
+    while (rows.length && rows[rows.length - 1].every(function (c) { return c === ''; })) rows.pop();
+    return rows;
+  }
+
+  function csvTable(rows) {
+    var table = document.createElement('table');
+    var thead = document.createElement('thead');
+    var htr = document.createElement('tr');
+    rows[0].forEach(function (cell) {
+      var th = document.createElement('th');
+      th.textContent = cell;
+      htr.appendChild(th);
+    });
+    thead.appendChild(htr);
+    table.appendChild(thead);
+    var tbody = document.createElement('tbody');
+    for (var r = 1; r < rows.length; r++) {
+      var tr = document.createElement('tr');
+      for (var c = 0; c < rows[0].length; c++) {
+        var td = document.createElement('td');
+        td.textContent = rows[r][c] == null ? '' : rows[r][c];
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    return table;
+  }
+
+  /* Same shape as the wikilink cache below, and for the same reasons: one
+     round trip per render rather than one per embed, answers kept for as long
+     as the folder stays put, and what is already known costs nothing on the
+     next keystroke. What is cached is the rendered node, not the file's text,
+     so re-rendering a document with a long chapter in it does not re-parse
+     that chapter every ninety milliseconds. */
+  var embedCache = {};      // name -> { node: Element } | { error: code }
+  var embedDir = null;
+  var embedAsking = {};
+
+  function fillEmbed(fig, name) {
+    var body = fig.querySelector('.embed-body');
+    if (!body) return;
+    var kind = embedKind(name);
+
+    if (kind === 'image') {
+      /* No round trip: an image is a src, and fixImages resolves it against
+         the document's folder exactly as it does for ![](…). A name with no
+         file behind it draws as a broken image, which is what a missing
+         ![](…) does today and is the same news. */
+      body.innerHTML = '';
+      var img = document.createElement('img');
+      img.setAttribute('src', name);
+      img.setAttribute('alt', name);
+      body.appendChild(img);
+      fixImages(body);
+      return;
+    }
+    if (kind === 'other') {
+      body.innerHTML = '';
+      body.appendChild(embedError(name, 'other'));
+      return;
+    }
+
+    var rec = embedCache[name];
+    if (!rec) return;                    /* still out, or never asked; leave the placeholder */
+    body.innerHTML = '';
+    if (rec.error) { body.appendChild(embedError(name, rec.error)); return; }
+    body.appendChild(rec.node.cloneNode(true));
+  }
+
+  function buildEmbedRecord(name, text) {
+    var kind = embedKind(name);
+    if (kind === 'csv') {
+      var rows = parseCSV(text);
+      if (rows.length < 2) return { error: 'thin-csv' };
+      var wrap = document.createElement('div');
+      wrap.className = 'embed-table';
+      wrap.appendChild(csvTable(rows));
+      return { node: wrap };
+    }
+    var box = renderEmbedded(text);
+    return box ? { node: box } : { error: 'unreadable' };
+  }
+
+  function paintEmbeds() {
+    if (embedDir !== state.docDir) {
+      embedDir = state.docDir;
+      embedCache = {};
+      embedAsking = {};
+    }
+    var figs = el.doc.querySelectorAll('figure.embed[data-embed]');
+    if (!figs.length) return;
+    var ask = [], seen = {};
+    for (var i = 0; i < figs.length; i++) {
+      var name = figs[i].getAttribute('data-embed');
+      fillEmbed(figs[i], name);
+      var kind = embedKind(name);
+      if (kind === 'image' || kind === 'other') continue;
+      if (embedCache[name] === undefined && !embedAsking[name] && !seen[name]) {
+        seen[name] = 1;
+        ask.push(name);
+      }
+    }
+    if (!ask.length) return;
+    ask.forEach(function (n) { embedAsking[n] = 1; });
+    send('embedRead', { names: ask });
+  }
+
+  /* The shell's answer: { name: { text } | { error } }. Merged rather than
+     replacing, because a document can render again while a batch is out. */
+  function setEmbeds(map) {
+    if (!map || typeof map !== 'object') return;
+    Object.keys(map).forEach(function (name) {
+      var r = map[name] || {};
+      delete embedAsking[name];
+      embedCache[name] = (typeof r.text === 'string')
+        ? buildEmbedRecord(name, r.text)
+        : { error: String(r.error || 'missing') };
+    });
+    var figs = el.doc.querySelectorAll('figure.embed[data-embed]');
+    for (var i = 0; i < figs.length; i++) fillEmbed(figs[i], figs[i].getAttribute('data-embed'));
+  }
+
+  /* An embedded file changed under us, or the folder did. */
+  function forgetEmbeds() {
+    embedCache = {};
+    embedAsking = {};
+    embedDir = null;
+    paintEmbeds();
+  }
+
   /* ---------------- which wikilinks point at something ----------------
 
      A link to a note that exists and a link to one that does not used to look
@@ -466,7 +722,7 @@ window.MM = (function () {
     .split(' ').forEach(function (t) { KILL_TAGS[t] = 1; });
 
   var OK_ATTR = {};
-  'href src alt title class id lang dir width height align colspan rowspan scope headers span start reversed value type checked disabled open datetime cite label data-wiki'
+  'href src alt title class id lang dir width height align colspan rowspan scope headers span start reversed value type checked disabled open datetime cite label data-wiki data-embed'
     .split(' ').forEach(function (a) { OK_ATTR[a] = 1; });
 
   var URL_ATTR = { href: 1, src: 1, cite: 1 };
@@ -952,6 +1208,7 @@ window.MM = (function () {
     invalidateAnchors();
     if (top !== null && el.prevPane.scrollTop !== top) setScroll('prev', top);
     paintWikilinks();
+    paintEmbeds();
     if (MM.onDocRendered) MM.onDocRendered();
     /* every block node the bin could have been parked against has just been
        thrown away, and the index it held may now name a different block */
@@ -3190,6 +3447,7 @@ window.MM = (function () {
     sessionCapture: sessionCapture, sessionRestore: sessionRestore,
     sessionBlank: sessionBlank,
     setWikiTargets: setWikiTargets, forgetWikiTargets: forgetWikiTargets,
+    setEmbeds: setEmbeds, forgetEmbeds: forgetEmbeds,
     onDocRendered: null, onPreviewScroll: null, onDirty: null
   };
   return MM;

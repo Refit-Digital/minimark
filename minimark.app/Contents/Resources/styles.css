@@ -846,6 +846,33 @@ body.focus #doc > .blk.cur { opacity: 1; }
 
 #doc img { max-width: 100%; border-radius: 8px; display: block; margin: 0 0 1.15em; }
 
+/* ![[embeds]]
+
+   Marked by a rule down the left rather than a box, because an embedded
+   chapter is the document continuing, not an aside about it. The rule says
+   "this came from somewhere else" and then gets out of the way; a card would
+   make every chapter of a manuscript look like a callout. */
+#doc figure.embed {
+  margin: 0 0 1.15em; padding: 0 0 0 16px;
+  border-left: 2px solid var(--rule-strong);
+}
+#doc figure.embed > .embed-body > :last-child { margin-bottom: 0; }
+#doc figure.embed > figcaption {
+  margin-top: .5em; color: var(--ink-soft);
+  font-size: .88em; line-height: 1.5;
+}
+#doc .embed-table { overflow-x: auto; }
+#doc .embed-table table { margin-bottom: 0; }
+
+/* Waiting on the shell. Named rather than spun, because the answer arrives in
+   a frame or two on anything local and a spinner would only ever be a flash. */
+.embed-wait { color: var(--faint); font-style: italic; }
+.embed-wait::after { content: '\2026'; }
+
+.embed-error { color: var(--syn-head); font-size: .93em; }
+.embed-nested { color: var(--ink-soft); font-size: .93em; }
+.embed-nested code { font-family: var(--mono); font-size: .9em; }
+
 /* front matter card */
 .fm-card {
   margin: 0 0 1.4em; padding: 12px 14px;

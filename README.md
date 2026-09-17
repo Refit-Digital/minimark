@@ -9,7 +9,9 @@ minimark is a native markdown editor with two ways to work:
 - **Split** — raw markdown on the left, rendered preview on the right.
 - **Live** — one surface. Click any paragraph to reveal its markdown, click away to render it again.
 
-Everything else stays out of the way until you ask for it: a command palette (`⌘K`) instead of a toolbar, zen mode, focus mode, typewriter scrolling, a style checker, local version history, and `[[wikilinks]]` between your own files. Paste a web page and it arrives as clean markdown; paste an image and it's saved beside your document.
+Everything else stays out of the way until you ask for it: one search field (`⌘K`) instead of a toolbar, reaching commands, the document's headings and your recent files at once; zen mode, focus mode, typewriter scrolling, a style checker, and local version history. Paste a web page and it arrives as clean markdown; paste an image and it's saved beside your document.
+
+`[[wikilinks]]` link your files to each other, and `![[a file]]` on a line of its own pulls that file in where it stands: another markdown file, a text file, a CSV as a table, or an image. Names may descend into a subfolder, so a book can embed its `chapters/`.
 
 Documents autosave a second after you stop typing, and reload if something else changes the file underneath you.
 
