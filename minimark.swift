@@ -157,7 +157,7 @@ let kImageExtensions = ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif",
 /// existing install can be migrated off it once, on first launch.
 let kPrefKeys = ["theme", "themeAuto", "themeLight", "themeDark", "font", "size",
                  "zen", "focus", "focusLevel", "typewriter", "styleCheck", "mode", "scroll",
-                 "fmtUse", "tabsPin"]
+                 "fmtUse", "tabsPin", "lenses"]
 
 // ============================================================================
 // Templates

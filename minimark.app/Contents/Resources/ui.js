@@ -553,16 +553,29 @@
      nothing the first fifty did not. */
   var STYLE_CAP = 2000;
 
-  function clearStyle() {
-    if (!styleMarks.length) return;
+  /* Notes and lens marks are cleared together and counted apart. The counter
+     and the stepper are the style check's; a lens has neither, deliberately. */
+  var lensMarks = [];
+
+  function unwrapMarks(list) {
     var parents = [];
-    for (var i = 0; i < styleMarks.length; i++) {
-      var m = styleMarks[i], p = m.parentNode;
+    for (var i = 0; i < list.length; i++) {
+      var m = list[i], p = m.parentNode;
       if (!p) continue;                       /* the block was re-rendered under us */
       p.replaceChild(document.createTextNode(m.textContent), m);
       if (parents.indexOf(p) === -1) parents.push(p);
     }
     for (var j = 0; j < parents.length; j++) parents[j].normalize();
+  }
+
+  function clearStyle() {
+    /* Order does not matter: a span is replaced by its textContent, which
+       already carries anything marked inside it, and the inner unwrap then
+       runs on a detached node and does nothing. Lenses go first only so the
+       stepper's index is reset last, beside the list it indexes. */
+    if (lensMarks.length) { unwrapMarks(lensMarks); lensMarks = []; }
+    if (!styleMarks.length) { styleAt = -1; return; }
+    unwrapMarks(styleMarks);
     styleMarks = []; styleAt = -1;
   }
 
@@ -592,28 +605,129 @@
     return out;
   }
 
+  function lensOn(id) { return !!(state.lenses && state.lenses[id]); }
+  function anyLens() { return lensOn('adverb') || lensOn('long') || lensOn('repeat'); }
+
+  function marksLeft() { return STYLE_CAP - styleMarks.length - lensMarks.length; }
+
+  /* A whole sentence, which is a range over a block rather than a run inside
+     one text node: a sentence can have emphasis in the middle of it. The
+     wrapper that focus mode already uses for exactly this does the walking. */
+  function paintLongSentences() {
+    var blks = el.doc.querySelectorAll('.blk');
+    for (var i = 0; i < blks.length && marksLeft() > 0; i++) {
+      var blk = blks[i];
+      /* A fence is its own block and a listing has no sentences. An open
+         block is a textarea and has no rendered text to wrap. */
+      if (blk.querySelector('pre') || blk.querySelector('textarea')) continue;
+      var text = blk.textContent;
+      if (!text) continue;
+      var ranges = MMLens.longSentences(text, MM.sentences);
+      if (!ranges.length) continue;
+      var made = MM.wrapRanges(blk, ranges, -1, 'lmark lmark-long');
+      for (var k = 0; k < made.length; k++) lensMarks.push(made[k]);
+    }
+  }
+
+  function overlapsAny(hit, list) {
+    for (var i = 0; i < list.length; i++) {
+      if (hit.at < list[i].at + list[i].len && list[i].at < hit.at + hit.len) return true;
+    }
+    return false;
+  }
+
+  /* Which words in each text node a lens wants coloured, as an array per node
+     index. Repetition is a question about the document rather than about a
+     text node, so the whole document is tokenised into one stream first and
+     the answers are handed back per node. */
+  function lensWordHits(nodes) {
+    var per = [], i;
+    for (i = 0; i < nodes.length; i++) per.push([]);
+    if (!window.MMLens) return per;
+
+    if (lensOn('adverb')) {
+      for (i = 0; i < nodes.length; i++) {
+        var av = MMLens.adverbs(nodes[i].nodeValue);
+        for (var a = 0; a < av.length; a++) {
+          per[i].push({ at: av[a].at, len: av[a].len, kind: 'adverb' });
+        }
+      }
+    }
+
+    if (lensOn('repeat')) {
+      var stream = [];
+      for (i = 0; i < nodes.length; i++) {
+        /* local offsets: the window is counted in words, not characters, so
+           the stream's own indices are what the rule reads */
+        var toks = MMLens.words(nodes[i].nodeValue, 0);
+        for (var t = 0; t < toks.length; t++) { toks[t].node = i; stream.push(toks[t]); }
+      }
+      var flagged = MMLens.repeats(stream);
+      Object.keys(flagged).forEach(function (idx) {
+        var tok = stream[idx];
+        per[tok.node].push({ at: tok.at, len: tok.len, kind: 'repeat' });
+      });
+    }
+
+    for (i = 0; i < per.length; i++) per[i].sort(function (x, y) { return x.at - y.at; });
+    return per;
+  }
+
   function paintStyle() {
     clearStyle();
     styleCounts = { filler: 0, cliche: 0, redundancy: 0 };
-    if (!state.styleCheck || !window.MMStyle) { updateStyleCount(); return; }
+    var notes = state.styleCheck && window.MMStyle;
+    var lenses = anyLens() && window.MMLens;
+    if (!notes && !lenses) { updateStyleCount(); return; }
+
+    /* Sentences before words. The word marks below go inside the spans this
+       leaves behind, which only works in that order. */
+    if (lenses && lensOn('long') && MM.wrapRanges) paintLongSentences();
+
     /* collect first, then replace: the walker is live and rewriting a node
        while it is standing on it is how you skip half the document */
     var nodes = styleTextNodes();
-    for (var i = 0; i < nodes.length && styleMarks.length < STYLE_CAP; i++) {
+    var lensHits = lenses ? lensWordHits(nodes) : null;
+
+    for (var i = 0; i < nodes.length && marksLeft() > 0; i++) {
       var node = nodes[i], v = node.nodeValue;
-      var hits = MMStyle.scan(v);
+      var hits = notes ? MMStyle.scan(v) : [];
+
+      /* A note beats a lens on the same word. "really" is filler and it is
+         also an adverb; the sentence that says why is worth more than the
+         colour that does not. */
+      if (lensHits) {
+        var extra = [];
+        for (var e = 0; e < lensHits[i].length; e++) {
+          var cand = lensHits[i][e];
+          if (overlapsAny(cand, hits) || overlapsAny(cand, extra)) continue;
+          extra.push(cand);
+        }
+        hits = hits.concat(extra).sort(function (x, y) { return x.at - y.at; });
+      }
+
       if (!hits.length || !node.parentNode) continue;
       var frag = document.createDocumentFragment(), at = 0;
-      for (var k = 0; k < hits.length && styleMarks.length < STYLE_CAP; k++) {
+      for (var k = 0; k < hits.length && marksLeft() > 0; k++) {
         var h = hits[k];
         if (h.at > at) frag.appendChild(document.createTextNode(v.slice(at, h.at)));
-        var mk = document.createElement('mark');
-        mk.className = 'smark smark-' + h.kind;
-        mk.title = h.why ? h.label + ': ' + h.why : h.label;
-        mk.appendChild(document.createTextNode(v.slice(h.at, h.at + h.len)));
+        var mk;
+        if (h.why === undefined) {
+          /* A lens says nothing. No title, nothing counting it, nothing
+             stepping through it: there is nothing wrong with an adverb. */
+          mk = document.createElement('span');
+          mk.className = 'lmark lmark-' + h.kind;
+          mk.appendChild(document.createTextNode(v.slice(h.at, h.at + h.len)));
+          lensMarks.push(mk);
+        } else {
+          mk = document.createElement('mark');
+          mk.className = 'smark smark-' + h.kind;
+          mk.title = h.why ? h.label + ': ' + h.why : h.label;
+          mk.appendChild(document.createTextNode(v.slice(h.at, h.at + h.len)));
+          styleMarks.push(mk);
+          styleCounts[h.kind]++;
+        }
         frag.appendChild(mk);
-        styleMarks.push(mk);
-        styleCounts[h.kind]++;
         at = h.at + h.len;
       }
       if (at < v.length) frag.appendChild(document.createTextNode(v.slice(at)));
@@ -628,7 +742,7 @@
      keystroke this editor is trying not to do. */
   function scheduleStyle() {
     if (styleTimer) clearTimeout(styleTimer);
-    if (!state.styleCheck) { clearStyle(); updateStyleCount(); return; }
+    if (!state.styleCheck && !anyLens()) { clearStyle(); updateStyleCount(); return; }
     styleTimer = setTimeout(function () { styleTimer = null; paintStyle(); }, 220);
   }
 
@@ -670,6 +784,58 @@
     var n = styleTotal();
     toast(n ? 'Style check  ·  ' + n + (n === 1 ? ' note' : ' notes')
             : 'Style check  ·  nothing flagged');
+  }
+
+  /* ---------------- lenses ----------------
+
+     Each is its own switch, the way iA's syntax classes are, because the
+     writer who wants to see adverbs today does not want the other two
+     shouting over them. Nothing here reports a total: the moment a lens has
+     a number beside it, it is a score, and a score is a judgement.
+
+     `lensLast` is iA's one detail worth copying outright. Turning lenses off
+     and on again brings back the set you had rather than making you rebuild
+     it, which is the difference between a switch you flick while reading and
+     a preference you visit. */
+  var lensLast = { adverb: 1 };
+
+  function lensIds() {
+    return MMLens ? MMLens.LENSES.map(function (l) { return l.id; }) : [];
+  }
+
+  function lensPref() {
+    return lensIds().filter(lensOn).join(',');
+  }
+
+  function saveLenses(silent) {
+    var on = lensPref();
+    if (on) lensLast = JSON.parse(JSON.stringify(state.lenses));
+    scheduleStyle();
+    if (!silent) send('pref', { key: 'lenses', value: on });
+  }
+
+  function setLens(id, on, silent) {
+    if (!state.lenses) state.lenses = {};
+    if (on) state.lenses[id] = 1; else delete state.lenses[id];
+    saveLenses(silent);
+    if (silent) return;
+    var name = 'Lens';
+    if (MMLens) MMLens.LENSES.forEach(function (l) { if (l.id === id) name = l.name; });
+    toast(name + (on ? ' on' : ' off'));
+  }
+
+  function setLensesOff(silent) {
+    state.lenses = {};
+    saveLenses(silent);
+    if (!silent) toast('Lenses off');
+  }
+
+  /* Off if any are on, otherwise back to the last set that was. */
+  function toggleLenses() {
+    if (anyLens()) { setLensesOff(); return; }
+    state.lenses = JSON.parse(JSON.stringify(lensLast));
+    saveLenses(false);
+    toast('Lenses on');
   }
 
   if (styleBtn) styleBtn.addEventListener('click', function () { setStyleCheck(!state.styleCheck); });
@@ -958,10 +1124,27 @@
       { title: 'Insert code block', run: function () { insertSnippet('```\n\n```'); } },
       { title: 'Insert horizontal rule', run: function () { insertSnippet('---'); } },
       { title: 'Insert today’s date', run: function () { insertSnippet(new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })); } },
-      { title: 'Insert front matter', run: function () { insertFrontMatter(); } }
-    ].concat(t)
+      { title: 'Insert front matter', run: function () { insertFrontMatter(); } },
+      { title: 'Toggle lenses', key: '⌃⌥L', hint: 'colour a class of word, say nothing about it',
+        run: toggleLenses },
+      { title: 'Lenses off', hint: 'no colouring', run: function () { setLensesOff(); } }
+    ].concat(lensCommands())
+     .concat(t)
      .map(function (it) { it.group = 'command'; return it; })
      .concat(recentItems());
+  }
+
+  /* One entry each, and each says what it colours rather than what it thinks
+     of it. "Adverbs" is a description; "too many adverbs" would be a verdict. */
+  function lensCommands() {
+    if (!window.MMLens) return [];
+    return MMLens.LENSES.map(function (l) {
+      return {
+        title: 'Lens: ' + l.name.toLowerCase(),
+        hint: 'colour them, and say nothing',
+        run: function () { setLens(l.id, !lensOn(l.id)); }
+      };
+    });
   }
 
   function insertSnippet(text) {
@@ -2157,6 +2340,7 @@
     }
     if (e.ctrlKey && e.altKey && e.code === 'KeyZ') { e.preventDefault(); setZen(!state.zen); return; }
     if (e.ctrlKey && e.altKey && e.code === 'KeyS') { e.preventDefault(); setStyleCheck(!state.styleCheck); return; }
+    if (e.ctrlKey && e.altKey && e.code === 'KeyL') { e.preventDefault(); toggleLenses(); return; }
     if (e.ctrlKey && e.altKey && e.code === 'KeyD') {
       e.preventDefault();
       setFocusLevel(state.focusLevel === 'sentence' ? 'paragraph' : 'sentence');
@@ -2558,6 +2742,14 @@
       applyFocusLevel();
       if (p.typewriter === '1') { state.typewriter = true; twBtn.classList.add('on'); }
       if (p.styleCheck === '1') setStyleCheck(true, true);
+      if (typeof p.lenses === 'string' && p.lenses) {
+        var known = lensIds();
+        state.lenses = {};
+        p.lenses.split(',').forEach(function (id) {
+          if (known.indexOf(id) > -1) state.lenses[id] = 1;
+        });
+        saveLenses(true);
+      }
       if (p.mode && p.mode !== state.mode) MM.setMode(p.mode, { animate: false });
       applyTheme(); MM.movePill(false);
       if (p.scroll) {
@@ -2580,6 +2772,7 @@
         focusSentence: function () { setFocusLevel('sentence'); },
         typewriter: function () { setTypewriter(!state.typewriter); },
         styleCheck: function () { setStyleCheck(!state.styleCheck); },
+        lenses: toggleLenses,
         themes: function () { themePop.classList.toggle('open'); },
         palette: openPalette,
         headings: openHeadings,
@@ -2676,6 +2869,8 @@
     '| ⌃⌥Z | Zen mode |',
     '| ⌘⇧D | Focus mode |',
     '| ⌘⇧T | Typewriter scrolling |',
+    '| ⌃⌥S | Style check: what to cut, and why |',
+    '| ⌃⌥L | Lenses: adverbs, long sentences, repeated words |',
     '',
     '## Writing',
     '',

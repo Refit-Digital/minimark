@@ -83,17 +83,39 @@ switched on.
 **What it costs.** A part-of-speech tagger. minimark deliberately refused this
 in `style-check.js:16-21`, and the reasoning there is correct.
 
-**Verdict: take the framing, not the parser.** Three lenses are decidable
-without a tagger:
+**Verdict: take the framing, not the parser. Done.** Three lenses, in
+`lenses.js` beside the style dictionary, each its own switch:
 
-| Lens | Rule | Precision |
-|---|---|---|
-| Adverbs | words ending `-ly` minus a ~40-word stoplist (`only`, `family`, `reply`, `apply`, `supply`, `rely`, `july`, `italy`…) | high |
-| Long sentences | reuse `sentences()` (`app.js:1115`); tint anything over ~30 words | exact |
-| Repeated words | any non-stopword appearing 3+ times within a 200-word window | exact |
+| Lens | Rule |
+|---|---|
+| Adverbs | words ending `-ly`, minus a 91-word stoplist, minimum five letters |
+| Long sentences | over 30 words, using `app.js`'s own sentence splitter |
+| Repeated words | a word used 3 times inside 200 words, minus 134 common ones |
 
-**The important part is that these are lenses, not warnings.** Off by default,
-toggled from `⌘K`, no badge counting your sins, and "last used" remembered.
+**The framing is enforced in the code, not just intended.** A lens is a
+`<span>` tinting the ink with no `title`; a note is a `<mark>` with a wavy
+underline and a sentence behind it. Nothing counts lenses, nothing steps
+through them. `⌃⌥L` is iA's *Enable Last Used* copied outright: off and on
+again brings back the set you had.
+
+Three things worth recording from the build:
+
+- **A note beats a lens on the same word.** "Really" is filler *and* an
+  adverb. The sentence that says why is worth more than the colour that does
+  not, so the lens stands down. Without that rule the two paint over each
+  other and the DOM is wrong, not just the design.
+- **A long sentence is a range over a block, not a run inside a text node**,
+  because a sentence can have emphasis in the middle of it. `wrapRanges` in
+  `app.js`, which focus mode already uses for exactly this, took a class
+  argument and now serves both. Blocks containing a `<pre>` are skipped: a
+  listing has no sentences.
+- **Repetition is a question about the document**, so every eligible text node
+  is tokenised into one stream before anything is marked. Counting per node
+  would have missed the repetition across a paragraph break, which is most
+  of it.
+
+26 assertions in `tools/lens-test.js`, most of them about what a lens must
+not do.
 
 ### 2.2 Content Blocks: transclusion
 
@@ -334,7 +356,7 @@ is nothing wrong with an adverb. Write that into `style-check.js` as a comment.
 4. **No tags.** (2.7)
 5. **No way to see the PDF before exporting it.** (2.5)
 6. **No running heads or page numbers in PDF.** (2.5)
-7. **No lenses beyond the word lists.** (2.1)
+7. ~~No lenses beyond the word lists.~~ **Done.** (2.1)
 
 **Tier 3, judgement calls**
 
@@ -351,7 +373,8 @@ is nothing wrong with an adverb. Write that into `style-check.js` as a comment.
    including the one-level limit and the refresh gap.
 3. ~~**Backlinks in the picker** (8.1).~~ **Done.** See §8.1; cheaper than the
    rest of this list, but not as cheap as "cheap once 1 exists" suggested.
-4. **Three lenses: adverbs, long sentences, repeated words.**
+4. ~~**Three lenses: adverbs, long sentences, repeated words.**~~ **Done.**
+   See §2.1.
 5. **Hashtags and open tasks into the merged picker.**
 6. **Smart punctuation on output only** (8.3). One pass, zero risk to the file.
 7. **Header/footer/title page, and a PDF mode in Preview.**

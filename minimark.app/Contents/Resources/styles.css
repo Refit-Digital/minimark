@@ -846,6 +846,31 @@ body.focus #doc > .blk.cur { opacity: 1; }
 
 #doc img { max-width: 100%; border-radius: 8px; display: block; margin: 0 0 1.15em; }
 
+/* Lenses.
+
+   Deliberately not shaped like a note. A note is a wavy underline: something
+   drawn under the word, with a sentence behind it, asking to be looked at. A
+   lens is the ink itself, because it is not objecting to the word, it is
+   saying what kind of word it is. Nothing to click, nothing to hover.
+
+   Long sentences are the exception and have to be a background: ink cannot
+   colour thirty words without becoming the page's new text colour.
+
+   Fixed hues on :root like the style check's, and for the same reason given
+   above it: derived from --accent they would mean a different thing in each
+   theme. Purple for adverbs is iA's, which is as good a reason as any and
+   means one less thing for anyone who has used both to relearn. */
+:root {
+  --lens-adverb: #7b5ea7;
+  --lens-repeat: #3f8f7a;
+  --lens-long:   rgba(128, 128, 128, .15);
+}
+#doc .lmark-adverb { color: var(--lens-adverb); }
+#doc .lmark-repeat { color: var(--lens-repeat); }
+#doc .lmark-long   { background: var(--lens-long); border-radius: 2px; }
+/* An adverb inside a long sentence keeps its own colour: the two lenses are
+   answering different questions and the reader asked both. */
+
 /* ![[embeds]]
 
    Marked by a rule down the left rather than a box, because an embedded

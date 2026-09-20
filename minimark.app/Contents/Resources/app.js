@@ -21,7 +21,7 @@ window.MM = (function () {
   var state = {
     text: '', blocks: [''], mode: 'split',
     editing: null, dirty: false,
-    zen: false, focus: false, typewriter: false, styleCheck: false,
+    zen: false, focus: false, typewriter: false, styleCheck: false, lenses: {},
     /* 'paragraph' lights the block you are in, 'sentence' the sentence. */
     focusLevel: 'paragraph',
     /* The block the caret was last in. Live view has no other way to answer
@@ -1412,7 +1412,7 @@ window.MM = (function () {
      markup is already in there alone — the tinted source line has spans of
      its own and this must not disturb them. Text nodes are collected before
      any splitting starts, because splitting one invalidates a live walker. */
-  function wrapRanges(root, ranges, cur) {
+  function wrapRanges(root, ranges, cur, cls) {
     var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
     var nodes = [], n;
     while ((n = walker.nextNode())) nodes.push(n);
@@ -1427,7 +1427,7 @@ window.MM = (function () {
         if (b <= a) continue;
         if (a - from > taken) frag.appendChild(document.createTextNode(node.nodeValue.slice(taken, a - from)));
         var span = document.createElement('span');
-        span.className = 'sn' + (r === cur ? ' cur' : '');
+        span.className = (cls || 'sn') + (r === cur ? ' cur' : '');
         span.appendChild(document.createTextNode(node.nodeValue.slice(a - from, b - from)));
         frag.appendChild(span);
         made.push(span);
@@ -3426,6 +3426,9 @@ window.MM = (function () {
     updateStatus: updateStatus, updateCaretStatus: updateCaretStatus,
     markDirty: markDirty, markCurrentLine: markCurrentLine, markCurrentBlock: markCurrentBlock,
     sentences: sentences, sentenceAt: sentenceAt,
+    /* the lens painter wraps sentence ranges too, and one wrapper that walks
+       text nodes correctly is worth more than two that nearly do */
+    wrapRanges: wrapRanges, unwrapAll: unwrapAll,
     paintBlockSentences: paintBlockSentences, paintLineSentences: paintLineSentences,
     wrapSelection: wrapSelection, insertLink: insertLink, copyRich: copyRich,
     setHeading: setHeading, toggleLinePrefix: toggleLinePrefix, selectionRect: selectionRect,
