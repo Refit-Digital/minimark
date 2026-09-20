@@ -361,7 +361,8 @@
       ['![[Another note]]', null, 'on its own line: pull that file in here'],
       ['![[chapters/one]]', null, 'a subfolder works too'],
       ['![[figures.csv]]', null, 'a CSV arrives as a table'],
-      ['![[note|A caption]]', null, 'caption under the embed']
+      ['![[note|A caption]]', null, 'caption under the embed'],
+      ['⌘K then <', null, 'which files link to this one']
     ]],
     ['Code & tables', [
       ['```js\ncode block\n```', '```\ncode block\n```'],
@@ -770,8 +771,8 @@
      which is the search they came here to avoid doing.
 
      A leading sigil narrows to one kind, for anyone who already knows:
-     `>` commands, `#` headings, `/` files. It costs one character, and
-     costs nothing to ignore.
+     `>` commands, `#` headings, `/` files, `<` what links here. It costs one
+     character, and costs nothing to ignore.
 
      Find is the one thing deliberately not absorbed. It is a bar, not a
      list: it paints every match at once, steps through them, and replaces.
@@ -781,12 +782,20 @@
   var pickerWrap = $('#pickerWrap'), pickerInput = $('#pickerInput'), pickerList = $('#pickerList');
   var pk = { items: [], filtered: [], sel: 0, open: false };
 
-  var SIGILS = { '>': 'command', '#': 'heading', '/': 'file' };
+  var SIGILS = { '>': 'command', '#': 'heading', '/': 'file', '<': 'backlink' };
 
   /* Also the tie-break when two items score alike, which is every item while
      the field is empty: opening on the document's own shape says more about
      where you are than the head of the command list does. */
-  var GROUP_RANK = { heading: 0, command: 1, file: 2 };
+  var GROUP_RANK = { heading: 0, command: 1, backlink: 2, file: 3 };
+
+  /* What an empty list means depends on what was being asked for. "Nothing
+     found" under a sigil reads as a broken field rather than as an answer. */
+  var EMPTY = {
+    heading: 'No headings in this document',
+    backlink: 'Nothing links here yet',
+    file: 'No recent files'
+  };
 
   function parseQuery(raw) {
     var s = raw.replace(/^\s+/, '');
@@ -833,8 +842,8 @@
 
     if (pk.sel >= pk.filtered.length) pk.sel = 0;
     if (!pk.filtered.length) {
-      pickerList.innerHTML = '<div class="pk-empty">' +
-        (pq.group === 'heading' ? 'No headings in this document' : 'Nothing found') + '</div>';
+      pickerList.innerHTML = '<div class="pk-empty">' + esc(EMPTY[pq.group] || 'Nothing found') +
+        '</div>';
       return;
     }
     pickerList.innerHTML = pk.filtered.map(function (it, i) {
@@ -965,6 +974,68 @@
     MM.setText(fm + state.text, { immediate: true });
   }
 
+  /* ---------------- what links here ----------------
+
+     Which files in the folder point at this one, and which mention its name
+     without pointing. The second half is the one worth having: it finds the
+     link the writer meant to make and did not.
+
+     The folder is the shell's, so the scan is the shell's, and it is asked for
+     only when the field opens rather than on every render. A folder is not
+     cheap to read and nobody needs the answer until they go looking. The
+     answer lands a moment later and redraws the list if it is still up, which
+     is why this is a section of the one field rather than a panel: a panel
+     would have to say something while it waited. */
+  /* Kept against the document it was an answer about, because the answer
+     outlives the question: a tab switch while the scan is out would otherwise
+     show one document's backlinks under another's name, and every row would
+     open the wrong file. */
+  var backlinks = { links: [], mentions: [], key: null, asked: null, at: 0 };
+
+  /* Long enough that ⌘K does not scan the folder every time somebody reaches
+     for a command, short enough that a link added in another window shows up
+     while the writer still remembers making it. */
+  var BACKLINK_MAX_AGE = 10e3;
+
+  function docKey() { return (state.docDir || '') + '/' + (state.fileName || ''); }
+
+  function requestBacklinks() {
+    var key = docKey();
+    if (backlinks.asked === key) return;                       /* already out */
+    if (backlinks.key === key && Date.now() - backlinks.at < BACKLINK_MAX_AGE) return;
+    backlinks.asked = key;
+    send('backlinks', {});
+  }
+
+  function setBacklinks(r) {
+    backlinks = {
+      links: (r && r.links) || [],
+      mentions: (r && r.mentions) || [],
+      key: backlinks.asked || docKey(),
+      asked: null,
+      at: Date.now()
+    };
+    /* The list the field is filtering was built when it opened, before this
+       answer existed. Redrawing it is not enough; it has to be rebuilt. The
+       typed query is read from the field, so whatever is half-typed survives. */
+    if (pk.open) { pk.items = allItems(); renderPicker(); }
+  }
+
+  function backlinkItems() {
+    /* An answer about a document that is no longer open is not an answer. */
+    if (backlinks.key !== docKey()) return [];
+    var open = function (path) {
+      return function () { send('openRecent', { path: path }); };
+    };
+    return backlinks.links.map(function (r) {
+      return { group: 'backlink', title: r.name, hint: 'links here backlink',
+               key: 'Links here', run: open(r.path) };
+    }).concat(backlinks.mentions.map(function (r) {
+      return { group: 'backlink', title: r.name, hint: 'mentions this unlinked backlink',
+               key: 'Mentions', run: open(r.path) };
+    }));
+  }
+
   function headingItems() {
     return headings().map(function (h) {
       return {
@@ -976,15 +1047,17 @@
     });
   }
 
-  function allItems() { return headingItems().concat(commandItems()); }
+  function allItems() {
+    return headingItems().concat(commandItems()).concat(backlinkItems());
+  }
 
   var PICKER_HINT = 'Search commands, headings and files';
 
   /* Both keys open the same field. ⌘R only arrives with the sigil already
      typed, so the shortcut people have in their fingers still goes straight to
      the outline. */
-  function openPalette() { openPicker(allItems(), PICKER_HINT); }
-  function openHeadings() { openPicker(allItems(), PICKER_HINT, '#'); }
+  function openPalette() { requestBacklinks(); openPicker(allItems(), PICKER_HINT); }
+  function openHeadings() { requestBacklinks(); openPicker(allItems(), PICKER_HINT, '#'); }
 
   /* ============================================================
      WINDOW DRAG STRIP
@@ -2410,6 +2483,10 @@
     setEmbeds: function (map) { MM.setEmbeds(map); },
     /* An embedded file has appeared, or the folder moved. */
     forgetEmbeds: function () { MM.forgetEmbeds(); },
+    /* Which files in the folder link to this one and which only mention it,
+       as { links: [{name, path}], mentions: […] }. Asked for when the field
+       opens, answered whenever the scan finishes. */
+    setBacklinks: setBacklinks,
     /* The version history store, read back from its sidecar file at launch.
        Separate from setPrefs because it is a document store, not a setting:
        it is large, it arrives on its own schedule, and a failure to parse it
@@ -2585,14 +2662,16 @@
     '',
     '## Getting around',
     '',
-    'Press `⌘K`. Commands, this document’s headings and your recent files are',
-    'all in the one field. Narrow it with a leading `>` for commands, `#` for',
-    'headings or `/` for files, or type and let them compete.',
+    'Press `⌘K`. Commands, this document’s headings, the files that link to it',
+    'and your recent files are all in the one field. Narrow it with a leading `>`',
+    'for commands, `#` for headings, `<` for what links here or `/` for files,',
+    'or type and let them compete.',
     '',
     '| Key | Does |',
     '| --- | --- |',
     '| ⌘K | Search everything |',
     '| ⌘R | The same field, on this document’s headings |',
+    '| ⌘K then `<` | Which files link to this one, and which only mention it |',
     '| ⌘F | Find and replace |',
     '| ⌃⌥Z | Zen mode |',
     '| ⌘⇧D | Focus mode |',

@@ -50,15 +50,19 @@ function extract(name) {
   throw new Error(`unbalanced braces after ${name}`);
 }
 
-/* wikiURL reads one thing off the app delegate and touches nothing else, so
-   it is lifted onto a shell that has exactly that one thing. */
+/* wikiURL is two functions: a wrapper that reads the open document's folder
+   off the app delegate, and the rule itself, which takes the folder it is
+   resolving against so backlinks can use it from another file's directory.
+   Both are lifted onto a shell holding the one property the wrapper wants. */
 const harness = `
 import Foundation
 
 final class Resolver {
     var docURL: URL?
 
-${extract('func wikiURL(')}
+${extract('func wikiURL(_ raw: String) -> URL? {')}
+
+${extract('func wikiURL(_ raw: String, from dir: URL) -> URL? {')}
 }
 
 let args = CommandLine.arguments

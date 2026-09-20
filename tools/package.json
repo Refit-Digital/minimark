@@ -4,7 +4,7 @@
   "private": true,
   "description": "Test and contract tools for minimark. Run `npm install` here, then `npm test`.",
   "scripts": {
-    "test": "node bridge-contract.js && node tabs-test.js && node live-edit-test.js && node style-check-test.js && node templates-test.js && node wikilink-test.js && node focus-test.js && node sentence-focus-test.js && node reveal-test.js && node picker-test.js && node embed-test.js && node encoding-test.js && node unsaved-test.js && node embed-path-test.js && node coordination-test.js",
+    "test": "node bridge-contract.js && node tabs-test.js && node live-edit-test.js && node style-check-test.js && node templates-test.js && node wikilink-test.js && node focus-test.js && node sentence-focus-test.js && node reveal-test.js && node picker-test.js && node embed-test.js && node backlink-test.js && node encoding-test.js && node unsaved-test.js && node embed-path-test.js && node backlink-scan-test.js && node coordination-test.js",
     "contract": "node bridge-contract.js",
     "tabs": "node tabs-test.js",
     "live": "node live-edit-test.js",
@@ -18,6 +18,8 @@
     "picker": "node picker-test.js",
     "embed": "node embed-test.js",
     "embed-path": "node embed-path-test.js",
+    "backlink": "node backlink-test.js",
+    "backlink-scan": "node backlink-scan-test.js",
     "focus": "node focus-test.js",
     "sentence": "node sentence-focus-test.js"
   },

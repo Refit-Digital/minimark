@@ -330,7 +330,7 @@ is nothing wrong with an adverb. Write that into `style-check.js` as a comment.
 
 **Tier 2, daily friction**
 
-3. **No backlinks.** Wikilinks go one way. (8.1)
+3. ~~No backlinks.~~ **Done.** (8.1)
 4. **No tags.** (2.7)
 5. **No way to see the PDF before exporting it.** (2.5)
 6. **No running heads or page numbers in PDF.** (2.5)
@@ -349,7 +349,8 @@ is nothing wrong with an adverb. Write that into `style-check.js` as a comment.
    changed from the plan and why.
 2. ~~**`![[file]]` transclusion**, allowing subfolders.~~ **Done.** See §2.2,
    including the one-level limit and the refresh gap.
-3. **Backlinks in the picker** (8.1). Cheap once 1 exists.
+3. ~~**Backlinks in the picker** (8.1).~~ **Done.** See §8.1; cheaper than the
+   rest of this list, but not as cheap as "cheap once 1 exists" suggested.
 4. **Three lenses: adverbs, long sentences, repeated words.**
 5. **Hashtags and open tasks into the merged picker.**
 6. **Smart punctuation on output only** (8.3). One pass, zero risk to the file.
@@ -406,10 +407,29 @@ nothing. Grouped by fit with the thesis, then by cost.
 
 - **Backlinks and potential backlinks.** iA lists files that link to this one,
   and files that *mention its name without linking*. The second is the clever
-  half: it finds connections you forgot to make. For minimark it is a `⌘K`
-  section, "Links here", built by the shell scanning the folder (it already
-  owns the folder and batches existence checks, `minimark.swift:5209`).
-  Absent. **Cost: small. Fit: a lens on the folder.**
+  half: it finds connections you forgot to make. **Done**, as a section of the
+  one field, reached by typing or by the `<` sigil.
+
+  Three things the build turned up that the plan did not:
+
+  - **`wikiURL` had to be split in two.** A link written in `chapters/one.md`
+    means a file beside *that*, not beside whatever document happens to be
+    open, so the rule now takes the folder it resolves against and the
+    old one-argument form is a wrapper. A single-argument version silently
+    attributes every subfolder link to the wrong file.
+  - **The answer outlives the question.** A scan is asked for when the field
+    opens and lands whenever it lands. It is stamped with the document it was
+    about, and a stamp that no longer matches shows nothing, because the
+    alternative is one document's backlinks listed under another's name with
+    every row opening the wrong file.
+  - **The item list is built when the field opens.** Redrawing it when the
+    answer arrives is not enough; it has to be rebuilt. This cost one test
+    failure to find and would have shipped as "backlinks never appear".
+
+  Scanning is capped at 2000 files, eight folders deep, 50 rows of each kind,
+  and runs off the main thread. A repeat within ten seconds reuses the last
+  answer, so reaching for a command does not scan the folder. 20 assertions in
+  `tools/backlink-test.js`, 29 in `tools/backlink-scan-test.js`.
 - **Wikilink autocomplete on `[[`.** A list of matching files; `⏎` inserts and
   moves past `]]`, `⇥` inserts and stays. Absent. **Cost: small** (the picker
   already exists).

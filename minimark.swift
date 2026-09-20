@@ -79,6 +79,15 @@ let kMaxWikiCheck = 400
 /// A chapter is tens of kilobytes; a megabyte is somebody embedding a log.
 let kMaxEmbedRead = 32
 let kMaxEmbedBytes = 1 << 20
+/// How many files a backlink scan will open, and how deep it will walk. The
+/// scan reads every markdown file under the document's folder, so both caps
+/// are about a folder somebody keeps their whole life in rather than about a
+/// folder somebody wrote a book in.
+let kMaxBacklinkFiles = 2000
+let kMaxBacklinkDepth = 8
+/// How many of each kind come back. Past this the list has stopped being an
+/// answer and started being a directory listing.
+let kMaxBacklinksShown = 50
 /// How long the launch waits for the history sidecar before showing documents
 /// without it. Generous — it is a single file read on a warm cache almost
 /// always — because losing this race costs the session's history, and only a
@@ -2600,6 +2609,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
         case "embedRead":
             if let names = body["names"] as? [String] { answerEmbedRead(names) }
+
+        case "backlinks":
+            answerBacklinks()
 
         case "histWrite":
             // An empty payload would truncate the sidecar to nothing, and load()
@@ -5200,13 +5212,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     /// from one folder to a tree is exactly what makes a symlink out of that
     /// tree worth planting, and `standardizedFileURL` does not follow one.
     func wikiURL(_ raw: String) -> URL? {
+        guard let dir = docURL?.deletingLastPathComponent() else { return nil }
+        return wikiURL(raw, from: dir)
+    }
+
+    /// The same rule, resolved against a folder given rather than the open
+    /// document's. Backlinks need it: a link written in `chapters/one.md` means
+    /// a file beside *that*, not beside whatever happens to be open.
+    func wikiURL(_ raw: String, from dir: URL) -> URL? {
         let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, name.count < 1024,
               !name.hasPrefix("/"), !name.hasPrefix("~"),
               !name.contains(":"),                         // the other path separator
               !name.contains("\0"),
-              !name.contains("\\"),
-              let dir = docURL?.deletingLastPathComponent()
+              !name.contains("\\")
         else { return nil }
 
         // Every component in its own right: "." and ".." are refused wherever
@@ -5297,6 +5316,154 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         guard let data = try? JSONSerialization.data(withJSONObject: out, options: []),
               let json = String(data: data, encoding: .utf8) else { return }
         js("if(window.App&&App.setEmbeds)App.setEmbeds(\(json))")
+    }
+
+    // ------------------------------------------------------------------
+    // Backlinks
+    //
+    // Which files point at this one, and which mention it without pointing.
+    // The second half is the useful one: it finds the connection the writer
+    // forgot to make, which is the whole reason to look.
+    //
+    // The folder is the shell's, so the scan is the shell's. It reads every
+    // markdown file under the document's own folder, which is why it is capped
+    // at both ends and why it happens off the main thread: a writer who keeps
+    // ten years of notes in one folder should get a slow answer, not a beach
+    // ball.
+    // ------------------------------------------------------------------
+
+    /// Every wikilink target written in `text`, embeds included, in order.
+    ///
+    /// A deliberately plain scan rather than the page's parser: this is the
+    /// shell, it has no marked, and the cost of a false positive here is one
+    /// extra row in a list. `[[this]]` inside a code fence counts as a link,
+    /// which is wrong and which nobody will ever mind.
+    func wikiTargets(in text: String) -> [String] {
+        var out: [String] = []
+        let chars = Array(text)
+        var i = 0
+        while i + 3 < chars.count {
+            guard chars[i] == "[", chars[i + 1] == "[" else { i += 1; continue }
+            var j = i + 2
+            var target = ""
+            var closed = false
+            while j + 1 < chars.count {
+                if chars[j] == "]" && chars[j + 1] == "]" { closed = true; break }
+                if chars[j] == "\n" || chars[j] == "[" { break }
+                target.append(chars[j])
+                j += 1
+            }
+            if closed {
+                // the label after a pipe is not part of the name
+                let name = target.split(separator: "|", maxSplits: 1,
+                                        omittingEmptySubsequences: false)
+                                 .first.map(String.init) ?? ""
+                let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { out.append(trimmed) }
+                i = j + 2
+            } else {
+                i += 2
+            }
+        }
+        return out
+    }
+
+    /// Whether `name` appears in `text` as a word in its own right. Used for
+    /// the mentions half, so "Kestrels" must not match a file called "Kestrel"
+    /// and "note" must not match "notebook".
+    func mentions(_ name: String, in text: String) -> Bool {
+        guard !name.isEmpty else { return false }
+        let hay = text.lowercased()
+        let needle = name.lowercased()
+        var search = hay.startIndex..<hay.endIndex
+        while let found = hay.range(of: needle, options: [], range: search) {
+            let beforeOK = found.lowerBound == hay.startIndex
+                || !(hay[hay.index(before: found.lowerBound)].isLetter
+                     || hay[hay.index(before: found.lowerBound)].isNumber)
+            let afterOK = found.upperBound == hay.endIndex
+                || !(hay[found.upperBound].isLetter || hay[found.upperBound].isNumber)
+            if beforeOK && afterOK { return true }
+            guard found.upperBound < hay.endIndex else { return false }
+            search = found.upperBound..<hay.endIndex
+        }
+        return false
+    }
+
+    /// What one file has to say about `target`: a link to it, a mention of its
+    /// name, or nothing. Pure, so it can be tested without a folder.
+    func backlinkKind(text: String, name: String, target: URL, from dir: URL) -> String? {
+        for raw in wikiTargets(in: text) {
+            guard let url = wikiURL(raw, from: dir) else { continue }
+            if url.resolvingSymlinksInPath().standardizedFileURL.path
+                == target.resolvingSymlinksInPath().standardizedFileURL.path { return "link" }
+        }
+        return mentions(name, in: text) ? "mention" : nil
+    }
+
+    func answerBacklinks() {
+        guard let me = docURL else {
+            js("if(window.App&&App.setBacklinks)App.setBacklinks({\"links\":[],\"mentions\":[]})")
+            return
+        }
+        let root = me.deletingLastPathComponent()
+        let name = me.deletingPathExtension().lastPathComponent
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let fm = FileManager.default
+            let kinds: Set<String> = ["md", "markdown", "txt", "text"]
+            var links: [[String: String]] = []
+            var mentions: [[String: String]] = []
+            var seen = 0
+
+            let walker = fm.enumerator(at: root,
+                                       includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+                                       options: [.skipsHiddenFiles, .skipsPackageDescendants])
+            while let item = walker?.nextObject() as? URL {
+                if seen >= kMaxBacklinkFiles { break }
+                // A folder deeper than this is somebody's archive, not the
+                // neighbourhood of the document being written.
+                if item.pathComponents.count - root.pathComponents.count > kMaxBacklinkDepth {
+                    walker?.skipDescendants(); continue
+                }
+                guard kinds.contains(item.pathExtension.lowercased()) else { continue }
+                guard let values = try? item.resourceValues(forKeys: [.isRegularFileKey,
+                                                                      .fileSizeKey]),
+                      values.isRegularFile == true else { continue }
+                if let size = values.fileSize, size > kMaxEmbedBytes { continue }
+                if item.standardizedFileURL.path == me.standardizedFileURL.path { continue }
+                seen += 1
+
+                // UTF-8 only, unlike an embed, which goes through the full
+                // decoder. This reads every file in the folder rather than one
+                // the writer named, and a scan that runs encoding detection
+                // two thousand times to find a backlink in somebody's 1998
+                // Latin-1 notes is the wrong trade.
+                guard let data = try? Data(contentsOf: item),
+                      let text = String(data: data, encoding: .utf8) else { continue }
+                guard let kind = self.backlinkKind(text: text, name: name, target: me,
+                                                   from: item.deletingLastPathComponent())
+                else { continue }
+
+                let row = ["name": item.lastPathComponent, "path": item.path]
+                if kind == "link" {
+                    if links.count < kMaxBacklinksShown { links.append(row) }
+                } else if mentions.count < kMaxBacklinksShown {
+                    mentions.append(row)
+                }
+            }
+
+            let byName: ([String: String], [String: String]) -> Bool = {
+                ($0["name"] ?? "").localizedStandardCompare($1["name"] ?? "") == .orderedAscending
+            }
+            let payload: [String: Any] = ["links": links.sorted(by: byName),
+                                          "mentions": mentions.sorted(by: byName)]
+            guard let out = try? JSONSerialization.data(withJSONObject: payload, options: []),
+                  let json = String(data: out, encoding: .utf8) else { return }
+            DispatchQueue.main.async {
+                self.js("if(window.App&&App.setBacklinks)App.setBacklinks(\(json))")
+            }
+        }
     }
 
     func openWikilink(_ name: String) {

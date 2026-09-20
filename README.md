@@ -9,9 +9,9 @@ minimark is a native markdown editor with two ways to work:
 - **Split** — raw markdown on the left, rendered preview on the right.
 - **Live** — one surface. Click any paragraph to reveal its markdown, click away to render it again.
 
-Everything else stays out of the way until you ask for it: one search field (`⌘K`) instead of a toolbar, reaching commands, the document's headings and your recent files at once; zen mode, focus mode, typewriter scrolling, a style checker, and local version history. Paste a web page and it arrives as clean markdown; paste an image and it's saved beside your document.
+Everything else stays out of the way until you ask for it: one search field (`⌘K`) instead of a toolbar, reaching commands, the document's headings, the files that link to it and your recent files at once; zen mode, focus mode, typewriter scrolling, a style checker, and local version history. Paste a web page and it arrives as clean markdown; paste an image and it's saved beside your document.
 
-`[[wikilinks]]` link your files to each other, and `![[a file]]` on a line of its own pulls that file in where it stands: another markdown file, a text file, a CSV as a table, or an image. Names may descend into a subfolder, so a book can embed its `chapters/`.
+`[[wikilinks]]` link your files to each other, and `![[a file]]` on a line of its own pulls that file in where it stands: another markdown file, a text file, a CSV as a table, or an image. Names may descend into a subfolder, so a book can embed its `chapters/`. `⌘K` then `<` turns the links around: which files point at this one, and which mention it without pointing.
 
 Documents autosave a second after you stop typing, and reload if something else changes the file underneath you.
 
@@ -44,18 +44,18 @@ npm install --include=dev
 npm test
 ```
 
-Fifteen suites. Eleven drive the web layer (`Contents/Resources/*.js`) through Playwright and run anywhere Node does. Four compile real functions out of `minimark.swift` into throwaway binaries, because file I/O, filename handling and path resolution cannot be tested in a browser. Individual suites run on their own; `tools/package.json` lists them all.
+Seventeen suites. Twelve drive the web layer (`Contents/Resources/*.js`) through Playwright and run anywhere Node does. Five compile real functions out of `minimark.swift` into throwaway binaries, because file I/O, filename handling and path resolution cannot be tested in a browser. Individual suites run on their own; `tools/package.json` lists them all.
 
-### The four that need a Mac
+### The five that need a Mac
 
-`encoding`, `unsaved`, `embed-path` and `coordination` need `swiftc`, which comes with the same command line tools the build does. They extract the functions they test rather than copying them, so they cannot quietly pass against a stale duplicate.
+`encoding`, `unsaved`, `embed-path`, `backlink-scan` and `coordination` need `swiftc`, which comes with the same command line tools the build does. They extract the functions they test rather than copying them, so they cannot quietly pass against a stale duplicate.
 
 They also cannot run anywhere but macOS, and not for want of a toolchain: `coordination` tests `NSFileCoordinator` and `NSFilePresenter`, which exist only in Apple's Foundation, and the others lean on macOS text encoding detection and `NSString` bridging.
 
 That matters because much of the work on minimark happens in a cloud session, where there is no Swift toolchain and no way to install one. Such a session can prove the web layer and nothing else. So after any change that touched `minimark.swift`, run both of these on a Mac before trusting it:
 
 ```bash
-cd tools && npm test      # all fifteen, including the four above
+cd tools && npm test      # all seventeen, including the five above
 cd .. && ./build.sh       # the only thing that proves the app still compiles
 ```
 
