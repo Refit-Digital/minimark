@@ -38,15 +38,28 @@ open minimark.app
 
 ## Testing
 
-The web layer (`Contents/Resources/*.js`) is tested with Playwright; a few suites compile pieces of `minimark.swift` itself into throwaway binaries to test file I/O and filename handling directly, since that logic can't run in a browser.
-
 ```bash
 cd tools
 npm install --include=dev
 npm test
 ```
 
-Individual suites are also runnable on their own — see `tools/package.json` for the full list.
+Fifteen suites. Eleven drive the web layer (`Contents/Resources/*.js`) through Playwright and run anywhere Node does. Four compile real functions out of `minimark.swift` into throwaway binaries, because file I/O, filename handling and path resolution cannot be tested in a browser. Individual suites run on their own; `tools/package.json` lists them all.
+
+### The four that need a Mac
+
+`encoding`, `unsaved`, `embed-path` and `coordination` need `swiftc`, which comes with the same command line tools the build does. They extract the functions they test rather than copying them, so they cannot quietly pass against a stale duplicate.
+
+They also cannot run anywhere but macOS, and not for want of a toolchain: `coordination` tests `NSFileCoordinator` and `NSFilePresenter`, which exist only in Apple's Foundation, and the others lean on macOS text encoding detection and `NSString` bridging.
+
+That matters because much of the work on minimark happens in a cloud session, where there is no Swift toolchain and no way to install one. Such a session can prove the web layer and nothing else. So after any change that touched `minimark.swift`, run both of these on a Mac before trusting it:
+
+```bash
+cd tools && npm test      # all fifteen, including the four above
+cd .. && ./build.sh       # the only thing that proves the app still compiles
+```
+
+`embed-path` is the one to watch. `wikiURL` is the only function in the app that turns a string a *document* wrote into a path the app will open, and the suite's 24 assertions are mostly about what it has to refuse: `..` in any position, a leading `/` or `~`, a dotfile at any depth, and anything that leaves the document's own folder by following a symlink.
 
 ## Project layout
 
