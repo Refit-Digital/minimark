@@ -66,6 +66,8 @@ ${extract('func wikiTargets(in text: String) -> [String] {')}
 
 ${extract('func mentions(_ name: String, in text: String) -> Bool {')}
 
+${extract('func hasTag(_ tag: String, in text: String) -> Bool {')}
+
 ${extract('func backlinkKind(')}
 }
 
@@ -76,6 +78,8 @@ case "targets":
     print(s.wikiTargets(in: args[2]).joined(separator: "|"))
 case "mentions":
     print(s.mentions(args[2], in: args[3]) ? "yes" : "no")
+case "tag":
+    print(s.hasTag(args[2], in: args[3]) ? "yes" : "no")
 case "kind":
     // kind <text> <name> <targetPath> <fromDir>
     print(s.backlinkKind(text: args[2], name: args[3],
@@ -109,6 +113,8 @@ try {
 const targets = text => execFileSync(bin, ['targets', text], { encoding: 'utf8' }).trim();
 const mentions = (name, text) =>
   execFileSync(bin, ['mentions', name, text], { encoding: 'utf8' }).trim();
+const tag = (name, text) =>
+  execFileSync(bin, ['tag', name, text], { encoding: 'utf8' }).trim();
 /* `from` is the folder the linking file sits in */
 const kind = (text, from) =>
   execFileSync(bin, ['kind', text, 'one', me, from], { encoding: 'utf8' }).trim();
@@ -143,6 +149,28 @@ ok('a name that is nowhere is not a mention', mentions('kestrel', 'buzzards only
 ok('a later occurrence still counts when the first is glued to a word',
    mentions('note', 'notebook, and then a note') === 'yes',
    mentions('note', 'notebook, and then a note'));
+
+console.log('\nwhich files carry a tag\n');
+
+ok('a tag in prose', tag('kestrel', 'filed under #kestrel today') === 'yes');
+ok('ignoring case', tag('kestrel', 'filed under #Kestrel') === 'yes');
+ok('at the very start', tag('kestrel', '#kestrel first') === 'yes');
+ok('at the very end', tag('kestrel', 'ends with #kestrel') === 'yes');
+ok('a hyphenated tag matches itself',
+   tag('field-note', 'see #field-note here') === 'yes');
+ok('but a prefix of it does not match it',
+   tag('field', 'see #field-note here') === 'no', tag('field', 'see #field-note here'));
+ok('nor does a longer tag starting the same way',
+   tag('kestrel', 'see #kestrels here') === 'no', tag('kestrel', 'see #kestrels here'));
+ok('an underscore is part of the tag',
+   tag('field', 'see #field_note here') === 'no');
+ok('a URL fragment is not a tag',
+   tag('section', 'http://x.com/page#section') === 'no',
+   tag('section', 'http://x.com/page#section'));
+ok('the bare word without a hash is not a tag',
+   tag('kestrel', 'a kestrel flew past') === 'no');
+ok('a tag that is nowhere is not there', tag('buzzard', 'only kestrels here') === 'no');
+ok('an empty tag is not a tag', tag('', 'anything at all') === 'no');
 
 console.log('\nlink, mention, or neither\n');
 

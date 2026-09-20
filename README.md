@@ -9,11 +9,11 @@ minimark is a native markdown editor with two ways to work:
 - **Split** — raw markdown on the left, rendered preview on the right.
 - **Live** — one surface. Click any paragraph to reveal its markdown, click away to render it again.
 
-Everything else stays out of the way until you ask for it: one search field (`⌘K`) instead of a toolbar, reaching commands, the document's headings, the files that link to it and your recent files at once; zen mode, focus mode, typewriter scrolling, a style checker, three lenses, and local version history. Paste a web page and it arrives as clean markdown; paste an image and it's saved beside your document.
+Everything else stays out of the way until you ask for it: one search field (`⌘K`) instead of a toolbar, reaching commands, the document's headings, its `#tags`, what is left to do in it, the files that link to it and your recent files at once; zen mode, focus mode, typewriter scrolling, a style checker, three lenses, and local version history. Paste a web page and it arrives as clean markdown; paste an image and it's saved beside your document.
 
 The style checker names what to cut and says why. The **lenses** say nothing at all: `⌃⌥L` colours adverbs, sentences over thirty words, or words you have used three times close together, and leaves you to draw the conclusion. There is nothing wrong with an adverb, so nothing counts them.
 
-`[[wikilinks]]` link your files to each other, and `![[a file]]` on a line of its own pulls that file in where it stands: another markdown file, a text file, a CSV as a table, or an image. Names may descend into a subfolder, so a book can embed its `chapters/`. `⌘K` then `<` turns the links around: which files point at this one, and which mention it without pointing.
+`[[wikilinks]]` link your files to each other, and `![[a file]]` on a line of its own pulls that file in where it stands: another markdown file, a text file, a CSV as a table, or an image. Names may descend into a subfolder, so a book can embed its `chapters/`. `⌘K` then `<` turns the links around: which files point at this one, and which mention it without pointing. `#tags` you write in the text are rows in the same field, both where you wrote them and in whichever other files carry them, and `- [ ] tasks` you have not ticked are under `[`.
 
 Documents autosave a second after you stop typing, and reload if something else changes the file underneath you.
 
@@ -46,7 +46,7 @@ npm install --include=dev
 npm test
 ```
 
-Eighteen suites. Thirteen drive the web layer (`Contents/Resources/*.js`) through Playwright and run anywhere Node does. Five compile real functions out of `minimark.swift` into throwaway binaries, because file I/O, filename handling and path resolution cannot be tested in a browser. Individual suites run on their own; `tools/package.json` lists them all.
+Nineteen suites. Fourteen drive the web layer (`Contents/Resources/*.js`) through Playwright and run anywhere Node does. Five compile real functions out of `minimark.swift` into throwaway binaries, because file I/O, filename handling and path resolution cannot be tested in a browser. Individual suites run on their own; `tools/package.json` lists them all.
 
 ### The five that need a Mac
 
@@ -57,7 +57,7 @@ They also cannot run anywhere but macOS, and not for want of a toolchain: `coord
 That matters because much of the work on minimark happens in a cloud session, where there is no Swift toolchain and no way to install one. Such a session can prove the web layer and nothing else. So after any change that touched `minimark.swift`, run both of these on a Mac before trusting it:
 
 ```bash
-cd tools && npm test      # all eighteen, including the five above
+cd tools && npm test      # all nineteen, including the five above
 cd .. && ./build.sh       # the only thing that proves the app still compiles
 ```
 

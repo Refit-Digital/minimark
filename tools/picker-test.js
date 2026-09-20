@@ -248,7 +248,8 @@ const DOC = [
   await page.waitForTimeout(300);
   await openWith('Meta+r');
   ok('⌘R still opens rather than refusing with a toast', await isOpen());
-  ok('and says so in the list', (await empty()) === 'No headings in this document',
+  /* `#` reaches tags as well as headings, so the empty state names both. */
+  ok('and says so in the list', (await empty()) === 'No headings or tags in this document',
      'empty state read: ' + await empty());
 
   await type('zen');

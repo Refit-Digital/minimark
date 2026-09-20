@@ -362,7 +362,9 @@
       ['![[chapters/one]]', null, 'a subfolder works too'],
       ['![[figures.csv]]', null, 'a CSV arrives as a table'],
       ['![[note|A caption]]', null, 'caption under the embed'],
-      ['⌘K then <', null, 'which files link to this one']
+      ['⌘K then <', null, 'which files link to this one'],
+      ['#a-tag', null, 'a tag: ⌘K finds it, here and in other files'],
+      ['- [ ] a task', null, 'open tasks are in ⌘K under `[`']
     ]],
     ['Code & tables', [
       ['```js\ncode block\n```', '```\ncode block\n```'],
@@ -855,6 +857,60 @@
     return out;
   }
 
+  /* ---------------- tags and open tasks ----------------
+
+     Both are things the writer put in the document meaning to come back to
+     them, which is the same thing a heading is, so both belong in the same
+     field rather than in a pane of their own.
+
+     Read off state.blocks like headings are, not off the rendered DOM: the
+     answer has to be the same in split view, where there is no rendered
+     document to read, and it has to survive a block being open for editing. */
+
+  /* A tag is a # with a letter straight after it, at the start of a line or
+     after a space or an opening bracket. That last part is what keeps
+     `example.com/page#section` and `rgb(#fff)` out of the list. A heading is
+     `# ` with a space, so it cannot match; `#Heading` with no space is not a
+     heading in markdown and is a tag, correctly. */
+  var TAG = /(^|[\s(\[])#([A-Za-z][\w-]*)/g;
+  var CODE_SPAN = /`[^`\n]*`/g;
+  var FENCE = /^\s{0,3}(?:```|~~~)/;
+
+  function tags() {
+    var seen = {}, out = [];
+    state.blocks.forEach(function (b, i) {
+      if (FENCE.test(b)) return;                 /* a # in code is a comment */
+      var text = b.replace(CODE_SPAN, ' ');
+      var m;
+      TAG.lastIndex = 0;
+      while ((m = TAG.exec(text))) {
+        var tag = m[2];
+        var key = tag.toLowerCase();
+        if (seen[key]) { seen[key].n++; continue; }
+        seen[key] = { tag: tag, i: i, n: 1 };
+        out.push(seen[key]);
+      }
+    });
+    return out;
+  }
+
+  var TASK = /^\s{0,8}(?:[-*+]|\d+[.)])\s+\[([ xX])\]\s*(.*)$/;
+
+  /* Open ones only. A done task is a record, not a thing to go to, and a
+     field that lists both is a field nobody scans twice. */
+  function openTasks() {
+    var out = [];
+    state.blocks.forEach(function (b, i) {
+      if (FENCE.test(b)) return;
+      var lines = b.split('\n');
+      for (var k = 0; k < lines.length; k++) {
+        var m = TASK.exec(lines[k]);
+        if (m && m[1] === ' ' && m[2].trim()) out.push({ text: m[2].trim(), i: i });
+      }
+    });
+    return out;
+  }
+
   function buildScrub() {
     var hs = headings();
     if (hs.length < 2) { scrub.innerHTML = ''; scrub.classList.remove('has'); return; }
@@ -948,25 +1004,37 @@
   var pickerWrap = $('#pickerWrap'), pickerInput = $('#pickerInput'), pickerList = $('#pickerList');
   var pk = { items: [], filtered: [], sel: 0, open: false };
 
-  var SIGILS = { '>': 'command', '#': 'heading', '/': 'file', '<': 'backlink' };
+  /* A sigil may select more than one kind. `#` takes headings and tags
+     together because both are the #-marked things in this document, and
+     because somebody looking for #kestrel will type the # they wrote. A
+     heading-only `#` would answer that with the outline and look broken. */
+  var SIGILS = {
+    '>': ['command'],
+    '#': ['heading', 'tag'],
+    '[': ['task'],
+    '/': ['file'],
+    '<': ['backlink']
+  };
 
   /* Also the tie-break when two items score alike, which is every item while
      the field is empty: opening on the document's own shape says more about
      where you are than the head of the command list does. */
-  var GROUP_RANK = { heading: 0, command: 1, backlink: 2, file: 3 };
+  var GROUP_RANK = { heading: 0, tag: 1, task: 2, command: 3, backlink: 4, file: 5 };
 
   /* What an empty list means depends on what was being asked for. "Nothing
      found" under a sigil reads as a broken field rather than as an answer. */
   var EMPTY = {
-    heading: 'No headings in this document',
+    heading: 'No headings or tags in this document',
+    tag: 'No tags in this document',
+    task: 'Nothing left to do in this document',
     backlink: 'Nothing links here yet',
     file: 'No recent files'
   };
 
   function parseQuery(raw) {
     var s = raw.replace(/^\s+/, '');
-    var group = SIGILS[s.charAt(0)] || null;
-    return { group: group, q: (group ? s.slice(1) : s).trim() };
+    var groups = SIGILS[s.charAt(0)] || null;
+    return { groups: groups, q: (groups ? s.slice(1) : s).trim() };
   }
 
   function score(hay, needle) {
@@ -991,7 +1059,7 @@
   function renderPicker() {
     var pq = parseQuery(pickerInput.value);
     pk.filtered = pk.items
-      .filter(function (it) { return !pq.group || it.group === pq.group; })
+      .filter(function (it) { return !pq.groups || pq.groups.indexOf(it.group) > -1; })
       .map(function (it, n) { return { it: it, n: n, s: score(it.title + ' ' + (it.hint || ''), pq.q) }; })
       .filter(function (x) { return x.s > 0; })
       .sort(function (a, b) {
@@ -1004,12 +1072,12 @@
 
     /* appended after the sort, so handing off to find never takes the
        selection off a real result */
-    if (!pq.group && pq.q.length > 1) pk.filtered.push(findItem(pq.q));
+    if (!pq.groups && pq.q.length > 1) pk.filtered.push(findItem(pq.q));
 
     if (pk.sel >= pk.filtered.length) pk.sel = 0;
     if (!pk.filtered.length) {
-      pickerList.innerHTML = '<div class="pk-empty">' + esc(EMPTY[pq.group] || 'Nothing found') +
-        '</div>';
+      pickerList.innerHTML = '<div class="pk-empty">' +
+        esc((pq.groups && EMPTY[pq.groups[0]]) || 'Nothing found') + '</div>';
       return;
     }
     pickerList.innerHTML = pk.filtered.map(function (it, i) {
@@ -1173,7 +1241,7 @@
      outlives the question: a tab switch while the scan is out would otherwise
      show one document's backlinks under another's name, and every row would
      open the wrong file. */
-  var backlinks = { links: [], mentions: [], key: null, asked: null, at: 0 };
+  var backlinks = { links: [], mentions: [], tags: {}, key: null, asked: null, at: 0 };
 
   /* Long enough that ⌘K does not scan the folder every time somebody reaches
      for a command, short enough that a link added in another window shows up
@@ -1182,18 +1250,27 @@
 
   function docKey() { return (state.docDir || '') + '/' + (state.fileName || ''); }
 
+  /* The tags go out with the request rather than the shell hunting for every
+     tag in the folder: the only ones worth gathering are the ones this
+     document actually uses, and sending them bounds the answer without the
+     shell having to guess at a cap. */
+  var MAX_TAGS_ASKED = 40;
+
   function requestBacklinks() {
     var key = docKey();
     if (backlinks.asked === key) return;                       /* already out */
     if (backlinks.key === key && Date.now() - backlinks.at < BACKLINK_MAX_AGE) return;
     backlinks.asked = key;
-    send('backlinks', {});
+    send('backlinks', {
+      tags: tags().slice(0, MAX_TAGS_ASKED).map(function (t) { return t.tag; })
+    });
   }
 
   function setBacklinks(r) {
     backlinks = {
       links: (r && r.links) || [],
       mentions: (r && r.mentions) || [],
+      tags: (r && r.tags) || {},
       key: backlinks.asked || docKey(),
       asked: null,
       at: Date.now()
@@ -1230,8 +1307,54 @@
     });
   }
 
+  /* A tag appears twice over: once as the place it was written, and once per
+     other file carrying it. The first is free and instant; the second arrives
+     with the backlink scan, which is already reading every file in the folder
+     and may as well answer both questions from the one pass. */
+  function tagItems() {
+    var here = tags();
+    var out = here.map(function (t) {
+      return {
+        group: 'tag',
+        title: '#' + t.tag,
+        hint: 'tag in this document',
+        key: t.n > 1 ? t.n + '\u00d7' : '',
+        run: function () { jumpToBlock(t.i); }
+      };
+    });
+    var files = (backlinks.key === docKey() && backlinks.tags) || {};
+    here.forEach(function (t) {
+      (files[t.tag.toLowerCase()] || []).forEach(function (r) {
+        out.push({
+          group: 'tag',
+          title: r.name,
+          hint: '#' + t.tag + ' tag in another file',
+          key: '#' + t.tag,
+          run: function () { send('openRecent', { path: r.path }); }
+        });
+      });
+    });
+    return out;
+  }
+
+  function taskItems() {
+    return openTasks().map(function (t) {
+      return {
+        group: 'task',
+        title: t.text,
+        hint: 'open task to do',
+        key: 'To do',
+        run: function () { jumpToBlock(t.i); }
+      };
+    });
+  }
+
   function allItems() {
-    return headingItems().concat(commandItems()).concat(backlinkItems());
+    return headingItems()
+      .concat(tagItems())
+      .concat(taskItems())
+      .concat(commandItems())
+      .concat(backlinkItems());
   }
 
   var PICKER_HINT = 'Search commands, headings and files';
@@ -2855,16 +2978,18 @@
     '',
     '## Getting around',
     '',
-    'Press `⌘K`. Commands, this document’s headings, the files that link to it',
-    'and your recent files are all in the one field. Narrow it with a leading `>`',
-    'for commands, `#` for headings, `<` for what links here or `/` for files,',
-    'or type and let them compete.',
+    'Press `⌘K`. Commands, this document’s headings, its `#tags` and what is',
+    'left to do in it, the files that link to it and your recent files are all in',
+    'the one field. Narrow it with a leading `>` for commands, `#` for headings',
+    'and tags, `[` for open tasks, `<` for what links here or `/` for files, or',
+    'type and let them compete.',
     '',
     '| Key | Does |',
     '| --- | --- |',
     '| ⌘K | Search everything |',
     '| ⌘R | The same field, on this document’s headings |',
     '| ⌘K then `<` | Which files link to this one, and which only mention it |',
+    '| ⌘K then `[` | What is still to do in this document |',
     '| ⌘F | Find and replace |',
     '| ⌃⌥Z | Zen mode |',
     '| ⌘⇧D | Focus mode |',

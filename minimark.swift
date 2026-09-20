@@ -88,6 +88,11 @@ let kMaxBacklinkDepth = 8
 /// How many of each kind come back. Past this the list has stopped being an
 /// answer and started being a directory listing.
 let kMaxBacklinksShown = 50
+/// How many tags one scan will gather, and how many files it will name for
+/// each. The page sends the tags its own document uses, so the first is a
+/// guard against a pasted wall of them rather than a real limit.
+let kMaxTagsGathered = 40
+let kMaxTagFilesShown = 20
 /// How long the launch waits for the history sidecar before showing documents
 /// without it. Generous — it is a single file read on a warm cache almost
 /// always — because losing this race costs the session's history, and only a
@@ -2611,7 +2616,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             if let names = body["names"] as? [String] { answerEmbedRead(names) }
 
         case "backlinks":
-            answerBacklinks()
+            answerBacklinks(tags: body["tags"] as? [String] ?? [])
 
         case "histWrite":
             // An empty payload would truncate the sidecar to nothing, and load()
@@ -5389,6 +5394,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         return false
     }
 
+    /// Whether `#tag` is written in `text`.
+    ///
+    /// Not `mentions` with a "#" stuck on the front: a tag ends where a tag
+    /// character stops, so `#field` must not match `#field-note`, and `-` and
+    /// `_` are tag characters where `mentions` treats them as boundaries. The
+    /// character before the # must not be one either, which is what keeps
+    /// `example.com/page#section` out of the answer.
+    func hasTag(_ tag: String, in text: String) -> Bool {
+        guard !tag.isEmpty else { return false }
+        let hay = text.lowercased()
+        let needle = "#" + tag.lowercased()
+        func isTagChar(_ c: Character) -> Bool {
+            return c.isLetter || c.isNumber || c == "-" || c == "_"
+        }
+        var search = hay.startIndex..<hay.endIndex
+        while let found = hay.range(of: needle, options: [], range: search) {
+            let beforeOK = found.lowerBound == hay.startIndex
+                || !isTagChar(hay[hay.index(before: found.lowerBound)])
+            let afterOK = found.upperBound == hay.endIndex
+                || !isTagChar(hay[found.upperBound])
+            if beforeOK && afterOK { return true }
+            guard found.upperBound < hay.endIndex else { return false }
+            search = found.upperBound..<hay.endIndex
+        }
+        return false
+    }
+
     /// What one file has to say about `target`: a link to it, a mention of its
     /// name, or nothing. Pure, so it can be tested without a folder.
     func backlinkKind(text: String, name: String, target: URL, from dir: URL) -> String? {
@@ -5400,13 +5432,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         return mentions(name, in: text) ? "mention" : nil
     }
 
-    func answerBacklinks() {
+    func answerBacklinks(tags: [String]) {
         guard let me = docURL else {
-            js("if(window.App&&App.setBacklinks)App.setBacklinks({\"links\":[],\"mentions\":[]})")
+            js("if(window.App&&App.setBacklinks)App.setBacklinks({\"links\":[],\"mentions\":[],\"tags\":{}})")
             return
         }
         let root = me.deletingLastPathComponent()
         let name = me.deletingPathExtension().lastPathComponent
+        // Deduplicated on the way in: the page sends what its document uses
+        // and a document may well use the same tag in three places.
+        var wanted: [String] = []
+        for t in tags {
+            let clean = t.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !clean.isEmpty, clean.count < 80, !wanted.contains(clean) else { continue }
+            wanted.append(clean)
+            if wanted.count >= kMaxTagsGathered { break }
+        }
+        // Settled before the scan starts, so the closure below captures a list
+        // that cannot change under it.
+        let wantedTags = wanted
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
@@ -5414,6 +5458,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             let kinds: Set<String> = ["md", "markdown", "txt", "text"]
             var links: [[String: String]] = []
             var mentions: [[String: String]] = []
+            var tagged: [String: [[String: String]]] = [:]
             var seen = 0
 
             let walker = fm.enumerator(at: root,
@@ -5441,11 +5486,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 // Latin-1 notes is the wrong trade.
                 guard let data = try? Data(contentsOf: item),
                       let text = String(data: data, encoding: .utf8) else { continue }
-                guard let kind = self.backlinkKind(text: text, name: name, target: me,
-                                                   from: item.deletingLastPathComponent())
-                else { continue }
+                // Not a guard: a file carrying one of this document's tags is
+                // worth naming even when it neither links here nor mentions
+                // the name, so the tag pass below runs either way.
+                let kind = self.backlinkKind(text: text, name: name, target: me,
+                                             from: item.deletingLastPathComponent())
 
                 let row = ["name": item.lastPathComponent, "path": item.path]
+                for tag in wantedTags where self.hasTag(tag, in: text) {
+                    if (tagged[tag]?.count ?? 0) < kMaxTagFilesShown {
+                        tagged[tag, default: []].append(row)
+                    }
+                }
+
+                guard let kind = kind else { continue }
                 if kind == "link" {
                     if links.count < kMaxBacklinksShown { links.append(row) }
                 } else if mentions.count < kMaxBacklinksShown {
@@ -5456,8 +5510,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             let byName: ([String: String], [String: String]) -> Bool = {
                 ($0["name"] ?? "").localizedStandardCompare($1["name"] ?? "") == .orderedAscending
             }
+            var tagsOut: [String: Any] = [:]
+            for (tag, rows) in tagged { tagsOut[tag] = rows.sorted(by: byName) }
             let payload: [String: Any] = ["links": links.sorted(by: byName),
-                                          "mentions": mentions.sorted(by: byName)]
+                                          "mentions": mentions.sorted(by: byName),
+                                          "tags": tagsOut]
             guard let out = try? JSONSerialization.data(withJSONObject: payload, options: []),
                   let json = String(data: out, encoding: .utf8) else { return }
             DispatchQueue.main.async {

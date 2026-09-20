@@ -318,9 +318,37 @@ Hashtags, and **Links** (*Backlinks*, *Potential Backlinks*, *Links*,
 kind, extension, dates, and a full search language (`#tag`, `[ ]` open tasks,
 `NEAR(time space)`, `name:`, `AND/OR/NOT`).
 
-**Verdict: decline the sidebar, take three things out of it.** Hashtags into
-the picker (unchanged). **Backlinks** and **open-task search** are the two new
-ones, both in §8, both delivered through the picker rather than a pane.
+**Verdict: decline the sidebar, take three things out of it. All three done**,
+every one as a section of the one field rather than a pane. Backlinks in
+§8.1; hashtags and open tasks shipped together, since both are things the
+writer marked meaning to come back to them, which is what a heading already
+is.
+
+- **`#tags` appear twice over**: once as the place they were written, with a
+  count when used more than once, and once per other file carrying them. The
+  second costs no second scan: the backlink pass is already reading every file
+  in the folder, so the page sends its own tags with the request and the shell
+  answers both questions from the one read. The tags a document does not use
+  are not gathered, which bounds the answer without the shell guessing a cap.
+- **`[` gives what is left to do.** Open tasks only. A ticked task is a
+  record, not somewhere to go, and a list of both is a list nobody scans
+  twice.
+- **`#` now selects headings *and* tags**, which meant a sigil had to be able
+  to name more than one kind. The alternative was a heading-only `#`
+  answering somebody who typed the `#kestrel` they wrote with the outline,
+  which reads as a broken field. The outline still ranks first, so `⌘R` is
+  unchanged in practice.
+
+Parsing is off `state.blocks`, not the rendered document, so the answer is
+the same in split view and survives a block being open for editing. A `#`
+inside a code span or a fence is not a tag, `# Heading` is not a tag and
+`#Heading` is, and `example.com/page#section` is not one either. On the Swift
+side `#field` does not match `#field-note`: a tag ends where tag characters
+stop, and `-` and `_` are tag characters where the mention matcher treats
+them as boundaries.
+
+28 assertions in `tools/tag-task-test.js`, 12 more in
+`tools/backlink-scan-test.js` for the shell's tag matching.
 
 ---
 
@@ -353,7 +381,7 @@ is nothing wrong with an adverb. Write that into `style-check.js` as a comment.
 **Tier 2, daily friction**
 
 3. ~~No backlinks.~~ **Done.** (8.1)
-4. **No tags.** (2.7)
+4. ~~No tags.~~ **Done.** (2.7)
 5. **No way to see the PDF before exporting it.** (2.5)
 6. **No running heads or page numbers in PDF.** (2.5)
 7. ~~No lenses beyond the word lists.~~ **Done.** (2.1)
@@ -375,7 +403,7 @@ is nothing wrong with an adverb. Write that into `style-check.js` as a comment.
    rest of this list, but not as cheap as "cheap once 1 exists" suggested.
 4. ~~**Three lenses: adverbs, long sentences, repeated words.**~~ **Done.**
    See §2.1.
-5. **Hashtags and open tasks into the merged picker.**
+5. ~~**Hashtags and open tasks into the merged picker.**~~ **Done.** See §2.7.
 6. **Smart punctuation on output only** (8.3). One pass, zero risk to the file.
 7. **Header/footer/title page, and a PDF mode in Preview.**
 8. **Three faces of one family, mono-leaning default.**
