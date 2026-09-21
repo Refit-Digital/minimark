@@ -48,7 +48,7 @@ npm install --include=dev
 npm test
 ```
 
-Twenty suites. Fifteen drive the web layer (`Contents/Resources/*.js`) through Playwright and run anywhere Node does. Five compile real functions out of `minimark.swift` into throwaway binaries, because file I/O, filename handling and path resolution cannot be tested in a browser. Individual suites run on their own; `tools/package.json` lists them all.
+Twenty-one suites. Sixteen drive the web layer (`Contents/Resources/*.js`) through Playwright and run anywhere Node does. Five compile real functions out of `minimark.swift` into throwaway binaries, because file I/O, filename handling and path resolution cannot be tested in a browser. Individual suites run on their own; `tools/package.json` lists them all.
 
 ### The five that need a Mac
 
@@ -59,7 +59,7 @@ They also cannot run anywhere but macOS, and not for want of a toolchain: `coord
 That matters because much of the work on minimark happens in a cloud session, where there is no Swift toolchain and no way to install one. Such a session can prove the web layer and nothing else. So after any change that touched `minimark.swift`, run both of these on a Mac before trusting it:
 
 ```bash
-cd tools && npm test      # all twenty, including the five above
+cd tools && npm test      # all twenty-one, including the five above
 cd .. && ./build.sh       # the only thing that proves the app still compiles
 ```
 
@@ -73,6 +73,12 @@ cd .. && ./build.sh       # the only thing that proves the app still compiles
 | `minimark.app/Contents/Resources/` | The web layer: `index.html`, `app.js` (editor/document logic), `ui.js` (chrome, menus, themes), `styles.css`, and vendored libraries. `style-check.js` and `lenses.js` hold the word lists, kept apart so disagreeing with one does not mean reading the editor. |
 | `build.sh` | Compiles, lipos, and signs. The only supported build path. |
 | `tools/` | Test suites and the bridge-contract checker that keeps the Swift and JS sides honest about the messages they pass each other. |
+
+## Typefaces
+
+minimark sets your writing in [iA Writer Duo](https://github.com/iaolo/iA-Fonts) by default, with Mono and Quattro beside it: three faces of one family rather than a list of unrelated ones. Duo is a monospace that gives `m`, `M`, `w` and `W` the room they need, and the reason it is the default is that a proportional face says *this is nearly done* while a monospaced one says *this is a draft*. For text that is not finished, the second is the more honest signal.
+
+The fonts ship with the app under the SIL Open Font License, unmodified. They are iA's work, based on IBM Plex; see [their note on Duospace](https://ia.net/topics/in-search-of-the-perfect-writing-font/).
 
 ## Acknowledgements
 

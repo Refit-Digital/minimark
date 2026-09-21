@@ -2,11 +2,67 @@
    minimark — a quiet markdown editor
    ============================================================ */
 
+/* ---------- the typeface ----------
+
+   Three faces of one family rather than five unrelated ones, and a writing
+   face rather than a reading face by default.
+
+   The argument, which is iA's and is worth restating because it is the only
+   reason to ship a megabyte of fonts: a proportional face says "this is
+   nearly done". A monospaced one says "this is a draft". For text that is
+   not finished, the second is the more honest signal, and the writer who
+   sees a draft as a draft cuts more freely. Duo is the middle position, a
+   monospace that gives m, M, w and W the room they need, which is what
+   makes it readable at length without ever looking typeset.
+
+   iA Writer Mono, Duo and Quattro, SIL Open Font License 1.1. Variable
+   files, so one per style covers every weight the app asks for; the axis is
+   400 to 700 and nothing here asks for more. See NOTICES.
+
+   The UI chrome deliberately stays on the system face. The typeface is a
+   decision about the writing, not about the buttons. */
+@font-face {
+  font-family: "iA Writer Mono"; font-style: normal; font-weight: 400 700;
+  font-display: block;
+  src: url("fonts/iAWriterMonoV.ttf") format("truetype-variations"),
+       url("fonts/iAWriterMonoV.ttf") format("truetype");
+}
+@font-face {
+  font-family: "iA Writer Mono"; font-style: italic; font-weight: 400 700;
+  font-display: block;
+  src: url("fonts/iAWriterMonoV-Italic.ttf") format("truetype-variations"),
+       url("fonts/iAWriterMonoV-Italic.ttf") format("truetype");
+}
+@font-face {
+  font-family: "iA Writer Duo"; font-style: normal; font-weight: 400 700;
+  font-display: block;
+  src: url("fonts/iAWriterDuoV.ttf") format("truetype-variations"),
+       url("fonts/iAWriterDuoV.ttf") format("truetype");
+}
+@font-face {
+  font-family: "iA Writer Duo"; font-style: italic; font-weight: 400 700;
+  font-display: block;
+  src: url("fonts/iAWriterDuoV-Italic.ttf") format("truetype-variations"),
+       url("fonts/iAWriterDuoV-Italic.ttf") format("truetype");
+}
+@font-face {
+  font-family: "iA Writer Quattro"; font-style: normal; font-weight: 400 700;
+  font-display: block;
+  src: url("fonts/iAWriterQuattroV.ttf") format("truetype-variations"),
+       url("fonts/iAWriterQuattroV.ttf") format("truetype");
+}
+@font-face {
+  font-family: "iA Writer Quattro"; font-style: italic; font-weight: 400 700;
+  font-display: block;
+  src: url("fonts/iAWriterQuattroV-Italic.ttf") format("truetype-variations"),
+       url("fonts/iAWriterQuattroV-Italic.ttf") format("truetype");
+}
+
 /* ---------- structure ---------- */
 :root {
   --ui:    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
-  --prose: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", system-ui, sans-serif;
-  --mono:  ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --prose: "iA Writer Duo", ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  --mono:  "iA Writer Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 
   --ease-spring: cubic-bezier(0.22, 1.00, 0.36, 1.00);
   --ease-soft:   cubic-bezier(0.32, 0.72, 0.24, 1.00);

@@ -305,10 +305,32 @@ Avenir, Mono (`ui.js:25-36`), default `system` (`ui.js:43`); eight sizes; six
 themes; measure `42rem` (`styles.css:57`).
 
 **Verdict: iA's current position is the softer option pass 1 proposed**, so
-the recommendation firms up: **three faces from one family, mono-leaning
-default.** `iA Writer Mono/Duo/Quattro` are open-licensed on GitHub
-(`iaolo/iA-Fonts`), or IBM Plex Mono/Sans/Serif. The point stands that the
-default should make a draft look like a draft.
+the recommendation firmed up to **three faces from one family, mono-leaning
+default. Done.**
+
+Shipped: iA Writer Mono, Duo and Quattro, vendored under SIL OFL 1.1 in
+`Resources/fonts/`. The six variable files are 900 KB in total, one per
+style, weight axis 400–700, which is everything the app asks for. Duo is the
+default, Mono is there for the writer who wants that said louder, Quattro is
+for reading it back. Code is set in Mono. The UI chrome deliberately stays on
+the system face: the typeface is a decision about the writing, not about the
+buttons.
+
+Five unrelated faces are gone. A preference naming one of them falls back to
+the default rather than to nothing, which `applyFont` already did for free.
+
+**Worth knowing before touching this again:** the fonts are OFL with the
+Reserved Font Name *iA Writer*, so they ship unmodified and under their own
+names. iA's README also asks that anyone using them reference iA Writer
+clearly, which NOTICES and the in-app Acknowledgements now do. The same
+README is pointed about not cloning their product; using their fonts in a
+different editor is squarely what the licence is for, but the credit is not
+optional and the branding is theirs.
+
+22 assertions in `tools/font-test.js`. The one that matters asserts the font
+*loaded*, not that the CSS names it: a `@font-face` pointing at a path that
+is not there fails silently and falls back to the stack, which looks almost
+right.
 
 ### 2.7 The Library, and why to say no
 
@@ -388,7 +410,7 @@ is nothing wrong with an adverb. Write that into `style-check.js` as a comment.
 
 **Tier 3, judgement calls**
 
-8. **Five unrelated fonts, defaulting to a proportional one.** (2.6)
+8. ~~Five unrelated fonts, defaulting to a proportional one.~~ **Done.** (2.6)
 9. **No provenance for pasted text.** (2.3)
 
 ---
@@ -407,7 +429,7 @@ is nothing wrong with an adverb. Write that into `style-check.js` as a comment.
 6. ~~**Smart punctuation on output only** (8.3).~~ **Done.** See §8.3,
    including why the post-pass had to move from the parser to the tree.
 7. **Header/footer/title page, and a PDF mode in Preview.**
-8. **Three faces of one family, mono-leaning default.**
+8. ~~**Three faces of one family, mono-leaning default.**~~ **Done.** See §2.6.
 9. **Paste provenance in the history store.**
 
 1 through 5 are each small. Together they change what the app is for.

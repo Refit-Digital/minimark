@@ -22,17 +22,25 @@
     { id: 'void',  name: 'Void',  kind: 'dark',  bg: '#000000', ink: '#d8d8d4', accent: '#8e9bff' }
   ];
 
+  /* Three faces of one family, and the order is the argument: Duo first
+     because a draft should look like a draft, Mono for the writer who wants
+     that said louder, Quattro for reading it back.
+
+     Five unrelated faces was a preference pane wearing a palette's clothes.
+     Nobody's writing improves at Avenir, and every one of the five was a
+     decision the app declined to make. See the @font-face block in
+     styles.css for why the default is the one it is.
+
+     The scales are nominal. All three are the same IBM Plex skeleton, so
+     they need far less correction than five unrelated faces did, but they
+     are worth an eye on a real screen. */
   var FONTS = [
-    { id: 'system',  name: 'System',   sample: 'Aa', scale: 1,
-      stack: '-apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif' },
-    { id: 'newyork', name: 'New York', sample: 'Aa', scale: 1.03,
-      stack: 'ui-serif, "New York", "Times New Roman", Georgia, serif' },
-    { id: 'iowan',   name: 'Iowan',    sample: 'Aa', scale: 1.02,
-      stack: '"Iowan Old Style", "Palatino", "Palatino Linotype", Georgia, serif' },
-    { id: 'avenir',  name: 'Avenir',   sample: 'Aa', scale: 0.99,
-      stack: '"Avenir Next", Avenir, "Helvetica Neue", sans-serif' },
-    { id: 'mono',    name: 'Mono',     sample: 'Aa', scale: 0.93,
-      stack: 'ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace' }
+    { id: 'duo',     name: 'Duo',      sample: 'Aa', scale: 1,
+      stack: '"iA Writer Duo", ui-monospace, "SF Mono", Menlo, monospace' },
+    { id: 'mono',    name: 'Mono',     sample: 'Aa', scale: 0.97,
+      stack: '"iA Writer Mono", ui-monospace, "SF Mono", Menlo, monospace' },
+    { id: 'quattro', name: 'Quattro',  sample: 'Aa', scale: 1,
+      stack: '"iA Writer Quattro", ui-sans-serif, -apple-system, sans-serif' }
   ];
 
   /* text size. Steps rather than free zoom, so every stop stays a size
@@ -40,8 +48,11 @@
   var SIZES = [0.82, 0.88, 0.94, 1, 1.08, 1.18, 1.3, 1.45];
   var SIZE_DEFAULT = 3;
 
+  /* An id that is no longer offered falls back to FONTS[0] in applyFont, so
+     a preference saved when there were five faces lands on the default
+     rather than on nothing. */
   var theme = { auto: true, manual: 'paper', light: 'paper', dark: 'ink', systemDark: false,
-                font: 'system', size: SIZE_DEFAULT };
+                font: 'duo', size: SIZE_DEFAULT };
 
   function resolvedTheme() {
     return theme.auto ? (theme.systemDark ? theme.dark : theme.light) : theme.manual;
@@ -3025,7 +3036,9 @@
     'your file.',
     '',
     'Click the filename in the middle of the bottom bar to rename it. The gear at',
-    'the far left of that bar holds six themes and five typefaces.',
+    'the far left of that bar holds six themes and three typefaces: Duo, Mono and',
+    'Quattro, three faces of one family. Duo is the default because a draft should',
+    'look like a draft.',
     '',
     '> Lists continue themselves on Enter. Tab nests them, and tidies a table',
     '> into aligned columns.',

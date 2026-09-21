@@ -5621,6 +5621,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             Khan Academy and contributors
             github.com/KaTeX/KaTeX
 
+            iA Writer Mono, Duo and Quattro — SIL Open Font License 1.1
+            Information Architects Inc., based on IBM Plex by IBM Corp.
+            github.com/iaolo/iA-Fonts
+
             The full licence text for each ships in NOTICES beside the app's             source. Their fonts and stylesheets are included unmodified.
             """
         alert.addButton(withTitle: "OK")
