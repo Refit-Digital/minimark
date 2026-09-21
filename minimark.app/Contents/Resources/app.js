@@ -22,6 +22,9 @@ window.MM = (function () {
     text: '', blocks: [''], mode: 'split',
     editing: null, dirty: false,
     zen: false, focus: false, typewriter: false, styleCheck: false, lenses: {},
+    /* On by default. A setting nobody finds is not the idea; the idea is that
+       the page is typeset and the file is not. */
+    smart: true,
     /* 'paragraph' lights the block you are in, 'sentence' the sentence. */
     focusLevel: 'paragraph',
     /* The block the caret was last in. Live view has no other way to answer
@@ -812,12 +815,102 @@ window.MM = (function () {
      keeps this cheap enough to sit in the per-block render path. */
   var scrubDoc = null;
 
+  /* ---------------- smart punctuation ----------------
+
+     The file keeps `"` and `--`. The page gets “ ” and —. That is the whole
+     idea: what is on disk stays plain text that any other editor reads the
+     same way, and what is rendered is typeset.
+
+     Done on the parsed tree rather than in a marked extension, which was the
+     first attempt and is a trap. A token's `.text` has already been HTML
+     escaped by the time an extension sees it, so a quote arrives as `&quot;`
+     and a replacement of `"` silently does nothing while the dash beside it
+     converts, which looks like a partly working feature rather than a wrong
+     approach. By the time the sanitiser has parsed the HTML, `&quot;` is a
+     quote character again and there is nothing to get wrong.
+
+     It also costs no extra parse: clean() already builds a tree, so this
+     walks the one that is there. */
+
+  /* Where a literal is a literal. Code is the obvious one; KaTeX has built
+     its own markup by now and rewriting the text inside it would be
+     rewriting an equation. */
+  var LITERAL = { CODE: 1, PRE: 1, KBD: 1, SAMP: 1, VAR: 1, TEXTAREA: 1 };
+
+  function openish(ch) {
+    return ch === '' || /[\s(\[{\u2014\u2013\u201C\u2018]/.test(ch);
+  }
+
+  /* `prev` is the character before this run, which is how a quote that closes
+     in a different text node from the one it opened in still faces the right
+     way: `a "b <em>c</em>" d` is three text nodes and one pair of quotes. */
+  function smarten(text, prev) {
+    /* Dashes and ellipsis first: neither depends on the quote state.
+
+       `--` becomes an em dash only with non-space on both sides or space on
+       both sides, which is what keeps `--flag` and `--help` intact for anyone
+       writing about a command line without reaching for backticks. */
+    text = text.replace(/---/g, '\u2014')
+               .replace(/(?<=\S)--(?=\S)/g, '\u2014')
+               .replace(/(?<=\s)--(?=\s)/g, '\u2014')
+               .replace(/\.\.\./g, '\u2026');
+
+    if (text.indexOf('"') === -1 && text.indexOf("'") === -1) return text;
+
+    var out = '', i, c, before, after;
+    for (i = 0; i < text.length; i++) {
+      c = text.charAt(i);
+      before = i > 0 ? text.charAt(i - 1) : (prev || '');
+      after = i + 1 < text.length ? text.charAt(i + 1) : '';
+      if (c === '"') {
+        out += openish(before) ? '\u201C' : '\u201D';
+      } else if (c === "'") {
+        /* An apostrophe is the common case and the one worth getting right:
+           don't, dogs', '90s. Anything else that follows a space opens. */
+        if (/[A-Za-z0-9]/.test(before)) out += '\u2019';
+        else if (/\d/.test(after)) out += '\u2019';
+        else if (openish(before)) out += '\u2018';
+        else out += '\u2019';
+      } else {
+        out += c;
+      }
+    }
+    return out;
+  }
+
+  function smartenTree(root) {
+    var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode: function (n) {
+        if (!n.nodeValue) return NodeFilter.FILTER_REJECT;
+        var p = n.parentNode;
+        while (p && p !== root) {
+          if (LITERAL[p.nodeName]) return NodeFilter.FILTER_REJECT;
+          if (p.classList && (p.classList.contains('katex') ||
+                              p.classList.contains('katex-display')))
+            return NodeFilter.FILTER_REJECT;
+          p = p.parentNode;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    var nodes = [], n;
+    while ((n = walker.nextNode())) nodes.push(n);
+    var prev = '';
+    for (var i = 0; i < nodes.length; i++) {
+      var v = nodes[i].nodeValue;
+      var t = smarten(v, prev);
+      if (t !== v) nodes[i].nodeValue = t;
+      prev = t.slice(-1);
+    }
+  }
+
   function clean(html) {
     if (!html) return '';
     try {
       if (!scrubDoc) scrubDoc = document.implementation.createHTMLDocument('mm-scrub');
       scrubDoc.body.innerHTML = String(html);
       scrubTree(scrubDoc.body);
+      if (state.smart) smartenTree(scrubDoc.body);
       return scrubDoc.body.innerHTML;
     } catch (e) {
       /* Never hand back the unsanitised input on failure. */
@@ -3426,6 +3519,8 @@ window.MM = (function () {
     updateStatus: updateStatus, updateCaretStatus: updateCaretStatus,
     markDirty: markDirty, markCurrentLine: markCurrentLine, markCurrentBlock: markCurrentBlock,
     sentences: sentences, sentenceAt: sentenceAt,
+    /* exposed so the tests can hold the rule to account without a document */
+    smarten: smarten,
     /* the lens painter wraps sentence ranges too, and one wrapper that walks
        text nodes correctly is worth more than two that nearly do */
     wrapRanges: wrapRanges, unwrapAll: unwrapAll,

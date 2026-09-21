@@ -15,6 +15,8 @@ The style checker names what to cut and says why. The **lenses** say nothing at 
 
 `[[wikilinks]]` link your files to each other, and `![[a file]]` on a line of its own pulls that file in where it stands: another markdown file, a text file, a CSV as a table, or an image. Names may descend into a subfolder, so a book can embed its `chapters/`. `⌘K` then `<` turns the links around: which files point at this one, and which mention it without pointing. `#tags` you write in the text are rows in the same field, both where you wrote them and in whichever other files carry them, and `- [ ] tasks` you have not ticked are under `[`.
 
+Straight quotes and `--` are typeset as `“ ”` and `—` on the page and left exactly as you typed them in the file. Code, fences and equations stay literal, and so does `--flag`.
+
 Documents autosave a second after you stop typing, and reload if something else changes the file underneath you.
 
 ## Building
@@ -46,7 +48,7 @@ npm install --include=dev
 npm test
 ```
 
-Nineteen suites. Fourteen drive the web layer (`Contents/Resources/*.js`) through Playwright and run anywhere Node does. Five compile real functions out of `minimark.swift` into throwaway binaries, because file I/O, filename handling and path resolution cannot be tested in a browser. Individual suites run on their own; `tools/package.json` lists them all.
+Twenty suites. Fifteen drive the web layer (`Contents/Resources/*.js`) through Playwright and run anywhere Node does. Five compile real functions out of `minimark.swift` into throwaway binaries, because file I/O, filename handling and path resolution cannot be tested in a browser. Individual suites run on their own; `tools/package.json` lists them all.
 
 ### The five that need a Mac
 
@@ -57,7 +59,7 @@ They also cannot run anywhere but macOS, and not for want of a toolchain: `coord
 That matters because much of the work on minimark happens in a cloud session, where there is no Swift toolchain and no way to install one. Such a session can prove the web layer and nothing else. So after any change that touched `minimark.swift`, run both of these on a Mac before trusting it:
 
 ```bash
-cd tools && npm test      # all nineteen, including the five above
+cd tools && npm test      # all twenty, including the five above
 cd .. && ./build.sh       # the only thing that proves the app still compiles
 ```
 

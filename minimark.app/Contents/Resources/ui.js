@@ -364,7 +364,8 @@
       ['![[note|A caption]]', null, 'caption under the embed'],
       ['⌘K then <', null, 'which files link to this one'],
       ['#a-tag', null, 'a tag: ⌘K finds it, here and in other files'],
-      ['- [ ] a task', null, 'open tasks are in ⌘K under `[`']
+      ['- [ ] a task', null, 'open tasks are in ⌘K under `[`'],
+      ['"quotes" and a--dash', null, 'typeset on the page, plain in the file']
     ]],
     ['Code & tables', [
       ['```js\ncode block\n```', '```\ncode block\n```'],
@@ -788,6 +789,21 @@
             : 'Style check  ·  nothing flagged');
   }
 
+  /* ---------------- smart punctuation ----------------
+
+     A toggle rather than a fact, because somebody writing about `--flag` or
+     quoting code in prose may want the page as literal as the file. On by
+     default: the point is that the page is typeset without anybody going
+     looking for a setting. */
+  function setSmart(on, silent) {
+    state.smart = !!on;
+    MM.renderDoc(true);
+    MM.paintSource();
+    if (silent) return;
+    send('pref', { key: 'smart', value: state.smart ? '1' : '0' });
+    toast(state.smart ? 'Smart punctuation on' : 'Smart punctuation off  \u00b7  the page reads as the file does');
+  }
+
   /* ---------------- lenses ----------------
 
      Each is its own switch, the way iA's syntax classes are, because the
@@ -1195,6 +1211,8 @@
       { title: 'Insert front matter', run: function () { insertFrontMatter(); } },
       { title: 'Toggle lenses', key: '⌃⌥L', hint: 'colour a class of word, say nothing about it',
         run: toggleLenses },
+      { title: 'Smart punctuation', hint: 'curly quotes and em dashes on the page, not in the file',
+        run: function () { setSmart(!state.smart); } },
       { title: 'Lenses off', hint: 'no colouring', run: function () { setLensesOff(); } }
     ].concat(lensCommands())
      .concat(t)
@@ -2865,6 +2883,8 @@
       applyFocusLevel();
       if (p.typewriter === '1') { state.typewriter = true; twBtn.classList.add('on'); }
       if (p.styleCheck === '1') setStyleCheck(true, true);
+      /* on unless it has been turned off, so a fresh install is typeset */
+      if (p.smart === '0') state.smart = false;
       if (typeof p.lenses === 'string' && p.lenses) {
         var known = lensIds();
         state.lenses = {};
@@ -2896,6 +2916,7 @@
         typewriter: function () { setTypewriter(!state.typewriter); },
         styleCheck: function () { setStyleCheck(!state.styleCheck); },
         lenses: toggleLenses,
+        smart: function () { setSmart(!state.smart); },
         themes: function () { themePop.classList.toggle('open'); },
         palette: openPalette,
         headings: openHeadings,

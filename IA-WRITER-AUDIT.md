@@ -404,7 +404,8 @@ is nothing wrong with an adverb. Write that into `style-check.js` as a comment.
 4. ~~**Three lenses: adverbs, long sentences, repeated words.**~~ **Done.**
    See §2.1.
 5. ~~**Hashtags and open tasks into the merged picker.**~~ **Done.** See §2.7.
-6. **Smart punctuation on output only** (8.3). One pass, zero risk to the file.
+6. ~~**Smart punctuation on output only** (8.3).~~ **Done.** See §8.3,
+   including why the post-pass had to move from the parser to the tree.
 7. **Header/footer/title page, and a PDF mode in Preview.**
 8. **Three faces of one family, mono-leaning default.**
 9. **Paste provenance in the history store.**
@@ -517,11 +518,32 @@ nothing. Grouped by fit with the thesis, then by cost.
 
 ### 8.3 Output
 
-- **Smart punctuation on output only.** *"Convert straight quotes and plain
-  dashes into smart counterparts for all formatted output."* The source keeps
-  `"` and `--`; Preview, PDF and HTML get `“ ”` and `—`. This is the thesis in
-  one setting: the file stays plain, the page is typeset. Absent. **Cost:
-  small** (a `marked` post-pass that skips code). **Do this one.**
+- **Smart punctuation on output only. Done**, on by default. Quotes, single
+  and double, `--` and `---` to an em dash, `...` to an ellipsis. Rendered
+  view, split preview, HTML export, PDF and print; never the source pane and
+  never the file.
+
+  **The "marked post-pass" in the line above was wrong, and wrong in an
+  instructive way.** A token's `.text` is already HTML-escaped by the time an
+  extension sees it, so a quote arrives as `&quot;`: replacing `"` silently
+  does nothing while the `--` beside it converts. That reads as a half-working
+  feature rather than a wrong approach, which is the expensive kind of bug.
+  It is done on the parsed tree instead, inside the sanitiser's existing
+  parse, where `&quot;` is a quote again. No second parse, and code exclusion
+  comes free from the tree.
+
+  Two deliberate rules: `--` converts only with non-space on both sides or
+  space on both sides, so `--flag` and `--help` survive for anyone writing
+  about a command line without reaching for backticks; and the character
+  before a run of text is threaded between text nodes, so a quote that opens
+  before an `<em>` and closes after it still faces the right way.
+
+  **Known limit:** a URL written in plain prose that markdown does not
+  autolink, and that contains `--` between non-space characters, will get an
+  em dash. Backticks or a real link avoid it. English quotes only; a locale
+  that uses `„ “` or `« »` would need the pairs to be a setting.
+
+  27 assertions in `tools/smart-test.js`.
 - **Metadata variables.** Front matter `Author: Jane` plus `[%Author]` in the
   text, substituted in Preview and export. Global defaults in settings,
   document values override, content-block values override both. minimark
