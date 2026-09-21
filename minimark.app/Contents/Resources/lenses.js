@@ -29,10 +29,16 @@
 window.MMLens = (function () {
   'use strict';
 
+  /* `paste` is the odd one and belongs here anyway: it is a lens by the only
+     test that matters, which is that it shows you something about the text
+     and says nothing about whether it is any good. Its rule lives in app.js
+     rather than in this file because it is not a rule about words, it is a
+     record of what happened. */
   var LENSES = [
     { id: 'adverb', name: 'Adverbs' },
     { id: 'long',   name: 'Long sentences' },
-    { id: 'repeat', name: 'Repeated words' }
+    { id: 'repeat', name: 'Repeated words' },
+    { id: 'paste',  name: 'What was pasted' }
   ];
 
   /* ------------------------------------------------------------ adverbs

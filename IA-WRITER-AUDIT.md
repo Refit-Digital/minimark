@@ -196,12 +196,33 @@ pasted ChatGPT conversation and offers to attribute it automatically, and
 authorship"*. That is a whole toolchain built to protect data that lives
 somewhere fragile.
 
-**Verdict: take the narrow version, keep it out of the file.** Unchanged, and
-now proven:
+**Verdict: take the narrow version, keep it out of the file. Done.**
 
-- On paste, record the range and its source.
-- Store it **in the history store, not the file** (`ui.js:931`).
-- One lens in `⌘K`: "Show what was pasted". Ranges tint, hover says when.
+- Every paste records its range. Ranges are kept in step with each edit by a
+  prefix/suffix diff of the text: typing above a pasted run moves it, typing
+  through it takes the part it overwrote and leaves the rest. Nothing
+  re-anchors by searching for the text again, which would mark the wrong copy
+  the first time somebody pastes the same sentence twice.
+- **Stored in the history sidecar, never in the `.md`**, and written only
+  beside the snapshot it describes so the two cannot drift. On open the
+  ranges are trusted only if the text still matches that snapshot: an offset
+  into a document edited elsewhere is not provenance, it is a guess. It also
+  travels with a parked tab.
+- **A fourth lens**, `What was pasted`, marking whole paragraphs, with the
+  time on hover, and exact lines in the source pane.
+
+**Paragraph granularity, deliberately.** The rendered document is not the
+source — markdown has been stripped and the punctuation typeset — so a
+character range in one is not a character range in the other. "You pasted
+something in this paragraph" is true; claiming to know which word would not
+be. The source pane has no such problem, so it gets exact lines.
+
+Two bugs the tests caught, both of the same shape: `anyLens()` listed the
+three lens ids literally, so a fourth never switched the painter on; and
+`scheduleStyle`'s early-out cleared marks and spans but not the block and
+line classes, so turning the last lens off left them on screen.
+
+21 assertions in `tools/paste-test.js`.
 
 The *Paste Edits From* idea is worth a note on its own: paste a revised
 version over a selection and only the differences change. Useful without any
@@ -411,7 +432,7 @@ is nothing wrong with an adverb. Write that into `style-check.js` as a comment.
 **Tier 3, judgement calls**
 
 8. ~~Five unrelated fonts, defaulting to a proportional one.~~ **Done.** (2.6)
-9. **No provenance for pasted text.** (2.3)
+9. ~~No provenance for pasted text.~~ **Done.** (2.3)
 
 ---
 
@@ -430,7 +451,7 @@ is nothing wrong with an adverb. Write that into `style-check.js` as a comment.
    including why the post-pass had to move from the parser to the tree.
 7. **Header/footer/title page, and a PDF mode in Preview.**
 8. ~~**Three faces of one family, mono-leaning default.**~~ **Done.** See §2.6.
-9. **Paste provenance in the history store.**
+9. ~~**Paste provenance in the history store.**~~ **Done.** See §2.3.
 
 1 through 5 are each small. Together they change what the app is for.
 

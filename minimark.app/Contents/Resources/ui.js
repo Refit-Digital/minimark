@@ -620,7 +620,45 @@
   }
 
   function lensOn(id) { return !!(state.lenses && state.lenses[id]); }
-  function anyLens() { return lensOn('adverb') || lensOn('long') || lensOn('repeat'); }
+
+  /* Paragraph granularity, and the comment on pastedBlocks in app.js says
+     why: the rendered document is not the source, so a character range in
+     one is not a character range in the other. Claiming to know which word
+     was pasted would be claiming more than is known. */
+  function paintPasted() {
+    var blocks = MM.pastedBlocks ? MM.pastedBlocks() : {};
+    var kids = el.doc.children;
+    for (var i = 0; i < kids.length; i++) {
+      var t = blocks[i];
+      kids[i].classList.toggle('pasted', t != null);
+      if (t != null) kids[i].setAttribute('data-pasted', stamp(t));
+      else kids[i].removeAttribute('data-pasted');
+    }
+    var lines = MM.pastedLines ? MM.pastedLines() : {};
+    var lns = el.hl ? el.hl.children : [];
+    for (var k = 0; k < lns.length; k++) lns[k].classList.toggle('pasted', lines[k] != null);
+  }
+
+  function clearPastedMarks() {
+    var m = el.doc.querySelectorAll('.blk.pasted');
+    for (var i = 0; i < m.length; i++) {
+      m[i].classList.remove('pasted');
+      m[i].removeAttribute('data-pasted');
+    }
+    if (el.hl) {
+      var l = el.hl.querySelectorAll('.ln.pasted');
+      for (var j = 0; j < l.length; j++) l[j].classList.remove('pasted');
+    }
+  }
+  /* Derived rather than listed. A fourth lens named in lenses.js and not
+     here left the painter switched off whenever that lens was the only one
+     on, which looked like the lens not working rather than like the painter
+     never running. */
+  function anyLens() {
+    var ids = lensIds();
+    for (var i = 0; i < ids.length; i++) if (lensOn(ids[i])) return true;
+    return false;
+  }
 
   function marksLeft() { return STYLE_CAP - styleMarks.length - lensMarks.length; }
 
@@ -692,7 +730,11 @@
     styleCounts = { filler: 0, cliche: 0, redundancy: 0 };
     var notes = state.styleCheck && window.MMStyle;
     var lenses = anyLens() && window.MMLens;
-    if (!notes && !lenses) { updateStyleCount(); return; }
+    if (!notes && !lenses) { clearPastedMarks(); updateStyleCount(); return; }
+
+    /* Neither a mark nor a span: whole blocks and whole lines, so it is done
+       apart from the run below and cleared apart from it too. */
+    if (lensOn('paste')) paintPasted(); else clearPastedMarks();
 
     /* Sentences before words. The word marks below go inside the spans this
        leaves behind, which only works in that order. */
@@ -756,7 +798,11 @@
      keystroke this editor is trying not to do. */
   function scheduleStyle() {
     if (styleTimer) clearTimeout(styleTimer);
-    if (!state.styleCheck && !anyLens()) { clearStyle(); updateStyleCount(); return; }
+    if (!state.styleCheck && !anyLens()) {
+      /* clearStyle takes the marks and the spans; the block and line classes
+         are neither, and turning the last lens off left them on screen. */
+      clearStyle(); clearPastedMarks(); updateStyleCount(); return;
+    }
     styleTimer = setTimeout(function () { styleTimer = null; paintStyle(); }, 220);
   }
 
@@ -3027,7 +3073,7 @@
     '| ⌘⇧D | Focus mode |',
     '| ⌘⇧T | Typewriter scrolling |',
     '| ⌃⌥S | Style check: what to cut, and why |',
-    '| ⌃⌥L | Lenses: adverbs, long sentences, repeated words |',
+    '| ⌃⌥L | Lenses: adverbs, long sentences, repeats, what you pasted |',
     '',
     '## Writing',
     '',

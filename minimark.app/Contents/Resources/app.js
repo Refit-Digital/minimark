@@ -1323,10 +1323,126 @@ window.MM = (function () {
     }, 90);
   }
 
+  /* ---------------- what was pasted ----------------
+
+     Which runs of this document arrived on the clipboard rather than through
+     the keyboard. Kept because it is a question writers now actually have,
+     and answered by observation rather than by guessing: there is no
+     classifier here and nothing is sent anywhere. You pasted this, at 14:03.
+
+     It is deliberately NOT written into the .md. iA writes authorship
+     annotations to the end of the file, and then has to ship a "Misplaced
+     Authorship" warning for when another app edits it: a whole toolchain
+     built to protect data living somewhere fragile. minimark's promise is
+     that the file is plain text any editor can touch, so provenance rides in
+     the history sidecar, where being lost is an inconvenience rather than a
+     corruption.
+
+     Ranges are offsets into state.text and are kept in step with every edit.
+     Nothing re-anchors by searching for the text again, which would attach
+     the mark to the wrong copy the first time somebody pastes the same
+     sentence twice. */
+  var pasted = [];             // [{at, len, t}] into state.text
+  var pasteArmed = 0;          // a paste is landing; the next edit is it
+
+  /* The clipboard reaches the document three ways: replaceRange for a
+     converted paste, the textarea's own default for a plain one, and the
+     shell for an image. Arming a flag rather than recording a range at each
+     of them means one place to get right instead of three. */
+  function armPaste() { pasteArmed = Date.now(); }
+
+  /* Typing, pasting and deleting are all one contiguous edit, so the common
+     prefix and suffix are enough to find it. Anything that is not contiguous
+     — a restore, a document being opened — is handled by dropping the ranges
+     outright rather than by pretending this can describe it. */
+  function diffEdit(before, after) {
+    if (before === after) return null;
+    var max = Math.min(before.length, after.length), a = 0, b = 0;
+    while (a < max && before.charCodeAt(a) === after.charCodeAt(a)) a++;
+    while (b < max - a &&
+           before.charCodeAt(before.length - 1 - b) === after.charCodeAt(after.length - 1 - b)) b++;
+    return { at: a, removed: before.length - a - b, inserted: after.length - a - b };
+  }
+
+  /* An edit under a range does not move it; an edit before it does; an edit
+     through it takes the part it overwrote and leaves the rest. */
+  function shiftPasted(d) {
+    var delta = d.inserted - d.removed, from = d.at, to = d.at + d.removed, out = [];
+    for (var i = 0; i < pasted.length; i++) {
+      var r = pasted[i], s = r.at, e = r.at + r.len;
+      if (e <= from) { out.push(r); continue; }
+      if (s >= to) { out.push({ at: s + delta, len: r.len, t: r.t }); continue; }
+      var head = Math.max(0, from - s), tail = Math.max(0, e - to);
+      if (head > 0) out.push({ at: s, len: head, t: r.t });
+      if (tail > 0) out.push({ at: to + delta, len: tail, t: r.t });
+    }
+    pasted = out;
+  }
+
+  function notePaste(d) {
+    pasted.push({ at: d.at, len: d.inserted, t: Date.now() });
+    pasted.sort(function (x, y) { return x.at - y.at; });
+    /* Two pastes that end up touching are one pasted run as far as anybody
+       reading the document is concerned. */
+    var out = [pasted[0]];
+    for (var i = 1; i < pasted.length; i++) {
+      var last = out[out.length - 1], r = pasted[i];
+      if (r.at <= last.at + last.len) {
+        last.len = Math.max(last.at + last.len, r.at + r.len) - last.at;
+        last.t = Math.max(last.t, r.t);
+      } else out.push(r);
+    }
+    pasted = out;
+  }
+
+  function clearPasted() { pasted = []; pasteArmed = 0; }
+
+  /* Which blocks hold pasted text. Block granularity on purpose: the rendered
+     document is not the source — markdown has been stripped from it and its
+     punctuation typeset — so a character range in one is not a character
+     range in the other. A mark that says "you pasted something in this
+     paragraph" is true; one that claimed to know which word would not be. */
+  function pastedBlocks() {
+    if (!pasted.length) return {};
+    var offs = blockStartOffsets(), spans = blockSpans(), out = {};
+    for (var i = 0; i < pasted.length; i++) {
+      var s = pasted[i].at, e = s + pasted[i].len;
+      for (var b = 0; b < spans.length; b++) {
+        if (spans[b][0] < e && s < spans[b][1]) out[b] = pasted[i].t;
+      }
+    }
+    return out;
+  }
+
+  function pastedLines() {
+    if (!pasted.length) return {};
+    var text = state.text, out = {};
+    for (var i = 0; i < pasted.length; i++) {
+      var from = text.slice(0, pasted[i].at).split('\n').length - 1;
+      var to = text.slice(0, pasted[i].at + pasted[i].len).split('\n').length - 1;
+      for (var l = from; l <= to; l++) out[l] = pasted[i].t;
+    }
+    return out;
+  }
+
   function setText(text, opts) {
     opts = opts || {};
+    var before = state.text;
     state.lastBlock = 0;
     state.text = String(text == null ? '' : text);
+    if (opts.keepPasted === false) {
+      clearPasted();
+    } else {
+      var d = diffEdit(before, state.text);
+      if (d) {
+        shiftPasted(d);
+        /* A second is long enough for the clipboard to land through any of
+           the three routes, short enough that the next thing typed is not
+           mistaken for it. */
+        if (d.inserted > 0 && pasteArmed && Date.now() - pasteArmed < 1000) notePaste(d);
+        pasteArmed = 0;
+      }
+    }
     if (opts.fromSource !== true) el.src.value = state.text;
     paintSource();
     if (opts.immediate) renderDoc(true); else scheduleRender();
@@ -2278,6 +2394,8 @@ window.MM = (function () {
       /* Travels with the tab: an unwritable file is a property of the
          document, not of which one happens to be on screen. */
       saveTrouble: state.saveTrouble,
+      /* A copy, for the same reason the undo stacks below are copied. */
+      pasted: pasted.slice(),
       /* Copies. The live stacks are mutated in place by every keystroke, so
          handing over the arrays themselves would leave a parked session
          growing along with the one on screen. */
@@ -2321,7 +2439,19 @@ window.MM = (function () {
     state.savedAt = s.savedAt || null;
     state.saveTrouble = s.saveTrouble || null;
 
-    setText(s.text || '', { immediate: true, markDirty: false });
+    /* Not an edit. Diffing one document against another would shift this
+       document's ranges by the difference between two unrelated texts. */
+    setText(s.text || '', { immediate: true, markDirty: false, keepPasted: false });
+    if (s.pasted && s.pasted.length) {
+      pasted = s.pasted.slice();
+    } else {
+      /* Nothing parked, so try the sidecar. Only when the text still matches
+         the snapshot the ranges were written against: an offset into a
+         document that has since been edited elsewhere is not provenance, it
+         is a guess. */
+      var hd = histDoc(false);
+      if (hd && hd.paste && hd.paste.length && hd.head === state.text) pasted = hd.paste.slice();
+    }
     state.lastBlock = s.lastBlock || 0;
 
     /* Set, not marked. The shell already knows this tab's dirty state — it is
@@ -2506,6 +2636,9 @@ window.MM = (function () {
     if (!ta || ta.tagName !== 'TEXTAREA') return;
     var dt = e.clipboardData;
     if (!dt) return;
+    /* Before any of the branches below, because every one of them ends with
+       the clipboard in the document one way or another. */
+    armPaste();
 
     if (dt.files && dt.files.length) {
       var f = dt.files[0];
@@ -3036,7 +3169,7 @@ window.MM = (function () {
        below, so without this, opening documents would pile up entries that the
        cap never sees. */
     if (!d) {
-      hist.docs[k] = { head: text, t: now, back: [], seen: now };
+      hist.docs[k] = { head: text, t: now, back: [], seen: now, paste: pasted.slice() };
       histTouch(k);
       histCapDocs();
       histMark();
@@ -3051,6 +3184,9 @@ window.MM = (function () {
     var delta = histDelta(text, d.head);
     d.back.unshift({ t: d.t, p: delta.p, s: delta.s, m: delta.m });
     d.head = text; d.t = now;
+    /* Written beside the head it describes, and only ever together with it,
+       so the two cannot get out of step. */
+    d.paste = pasted.slice();
     histTouch(k);
     histTrim();
     histMark();
@@ -3513,6 +3649,10 @@ window.MM = (function () {
     splitBlocks: splitBlocks, joinBlocks: joinBlocks,
     blockSpans: blockSpans, spliceBlock: spliceBlock, docText: docText,
     blockStartOffsets: blockStartOffsets, blockIndexForOffset: blockIndexForOffset,
+    armPaste: armPaste, clearPasted: clearPasted,
+    pastedBlocks: pastedBlocks, pastedLines: pastedLines,
+    pastedRanges: function () { return pasted; },
+    setPastedRanges: function (list) { pasted = Array.isArray(list) ? list : []; },
     editBlock: editBlock, commitEditing: commitEditing,
     setMode: setMode, movePill: movePill, positionBar: positionBar,
     staggerBlocks: staggerBlocks,

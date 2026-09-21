@@ -920,6 +920,7 @@ body.focus #doc > .blk.cur { opacity: 1; }
   --lens-adverb: #7b5ea7;
   --lens-repeat: #3f8f7a;
   --lens-long:   rgba(128, 128, 128, .15);
+  --lens-paste:  #9a6b9e;
 }
 #doc .lmark-adverb { color: var(--lens-adverb); }
 #doc .lmark-repeat { color: var(--lens-repeat); }
@@ -953,6 +954,28 @@ body.focus #doc > .blk.cur { opacity: 1; }
 .embed-error { color: var(--syn-head); font-size: .93em; }
 .embed-nested { color: var(--ink-soft); font-size: .93em; }
 .embed-nested code { font-family: var(--mono); font-size: .9em; }
+
+/* What was pasted.
+
+   A rule down the left of the paragraph rather than a tint across it: this
+   marks a whole block because that is all it honestly knows, and a block-wide
+   background would read as a claim about every word in it. Dashed, because
+   the edge of what was pasted is not exactly the edge of the paragraph. */
+#doc .blk.pasted { position: relative; }
+#doc .blk.pasted::before {
+  content: ''; position: absolute; top: .15em; bottom: .15em; left: -14px;
+  border-left: 2px dashed var(--lens-paste);
+}
+#doc .blk.pasted::after {
+  content: attr(data-pasted);
+  position: absolute; top: .1em; right: 100%; margin-right: 22px;
+  white-space: nowrap; font-family: var(--ui); font-size: 10.5px;
+  color: var(--lens-paste); opacity: 0; transition: opacity 160ms var(--ease-soft);
+}
+#doc .blk.pasted:hover::after { opacity: .75; }
+
+/* The source pane knows the exact lines, so it says so there. */
+#hl .ln.pasted { border-left: 2px dashed var(--lens-paste); margin-left: -8px; padding-left: 6px; }
 
 /* front matter card */
 .fm-card {
