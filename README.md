@@ -24,9 +24,11 @@ Requires the Xcode command line tools (`xcode-select --install`) — no Xcode pr
 This compiles `minimark.swift` for both Apple Silicon and Intel, lipos them into a universal binary, and produces:
 
 - `minimark.app` — the bundle in this repo. Its `Resources/` are the real source files, so editing `app.js`, `ui.js`, or `styles.css` shows up on next launch without rebuilding.
-- `build/minimark.app` — a self-contained copy, ready to zip and ship.
+- `build/minimark.app` — a self-contained copy, with the Resources folded in.
 
 Neither is committed; a fresh clone is meant to build both from scratch.
+
+Both are signed ad-hoc, which is enough to run on the machine that built them and not enough to send anywhere. macOS refuses a copy that arrives from somewhere else — downloaded, AirDropped, or unzipped from a release — and says the app is damaged rather than that it is unsigned. Handing someone a build means a Developer ID certificate and notarising it, which this project does not have. So the way to get minimark is to build it: the command above, and nothing beyond the command line tools.
 
 ## Running
 

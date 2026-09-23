@@ -17,28 +17,32 @@ it. Almost every item in it is now closed — see *What has landed* at the end.
 
 ## Tier 1 — costs someone their work, or their trust
 
-### 1. Nobody else can run the app you ship
+Empty, for the first time. The four entries the September audit had here are closed, and the last
+thing that belonged in it — a README that promised a build it could not deliver — was corrected on
+23 September.
 
-`build/minimark.app` is ad-hoc signed: `Signature=adhoc`, `TeamIdentifier=not set`, and
-`spctl --assess --type execute` returns **rejected**. A copy downloaded from anywhere is refused by
-Gatekeeper with a message about the app being damaged. There are no GitHub releases, so today the only
-way in is to build from source — which works, and needs nothing but the Xcode command line tools.
-
-The README does not say that. Line 27 calls `build/minimark.app` "a self-contained copy, ready to zip
-and ship", which is true for you and false for everybody else.
-
-Two honest ways out, and they are a decision rather than a task:
-
-- **Notarize.** A Developer ID certificate and a notarization step in `build.sh`. Costs the Apple
-  Developer Program, and then a download works for strangers.
-- **Don't, and say so.** Correct the README, and point people at `./build.sh`. Costs nothing, and the
-  repo stops promising something it cannot do.
-
-Until one of them happens, the README is the problem, not the signing.
+Keep it empty by being strict about what earns a place in it: something that loses a writer's text,
+or tells them a thing that is not true.
 
 ---
 
 ## Tier 2 — friction a writer meets, or a claim the app cannot keep
+
+### 1. Whether to hand anyone a build — a decision, not a task
+
+`build/minimark.app` is ad-hoc signed: `Signature=adhoc`, `TeamIdentifier=not set`, and
+`spctl --assess --type execute` returns **rejected**. macOS refuses a copy that arrives from anywhere
+else and calls the app damaged, which is a worse message than "unsigned" and sends people looking for
+a fault that is not there. There are no releases, and the README now says all of this and points at
+`./build.sh`, which works with nothing but the command line tools.
+
+So nothing is untrue, and this is a choice about reach rather than a defect:
+
+- **Stay source-only.** Costs nothing. Anyone who can clone can build.
+- **Notarize.** A Developer ID certificate and a notarising step in `build.sh`, and then a download
+  works for strangers. Costs the Apple Developer Program yearly.
+
+Only the second one makes item 5 below matter.
 
 ### 2. ⌃Tab may not switch tabs — unresolved, one keypress settles it
 
