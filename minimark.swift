@@ -605,6 +605,17 @@ func goneForGood(looks: Int, since: Date?, now: Date = Date()) -> Bool {
 // and that tick is what Intent stops. A bare `rm` is the one thing nothing
 // reports at all — measured, no callback of any kind — and that one is the
 // poll's, in checkFileOnDisk.
+//
+// Taking turns was never the whole of it, and the running app showed what
+// was missing: whose turn it is says nothing about whether the file is still
+// the one the writer's text was made from. Another process wrote the file
+// while the writer had typing unsaved; the save waiting behind it took its
+// turn and replaced that write with text built on the version before, and
+// nothing asked, because the save's own stamp then said the file was ours.
+// So a save now looks before it replaces — at the bytes, with the file still
+// held, so that nothing which coordinates can land between the look and the
+// swap — and a file that is not the version its text came from is left alone
+// and asked about. See Base.
 // ============================================================================
 
 enum Coordinated {
@@ -621,6 +632,166 @@ enum Coordinated {
         /// when the claim is granted means the document is not there any more,
         /// and writing would recreate the name it left rather than save it.
         case update
+    }
+
+    /// The version of a document that the text on screen was made from — the
+    /// last thing its tab read from the file or wrote to it — and the one
+    /// question every save of that document asks with the file held: is what
+    /// is on disk still that version?
+    ///
+    /// A save used to replace whatever it found, and in the running app that
+    /// cost a writer somebody else's work. Another process wrote
+    /// the file while the writer had typing unsaved; the look that should have
+    /// asked about it was still waiting for that process to let go, and came
+    /// back to a tab that had been typed in, so it rightly left the question
+    /// for the next look. The autosave got there first. It replaced the other
+    /// process's write with text built on the version before it, and then its
+    /// own stamp told the next look that the file said what the save had put
+    /// there — which it did. No question was ever asked. Nothing that looks
+    /// from outside the write can close that, because the look and the save
+    /// race. So the save asks, inside its own claim: every coordinating writer
+    /// is held off from the moment it looks to the moment it swaps, and nothing
+    /// that coordinates can land in between.
+    ///
+    /// It compares bytes, not the date and size a FileMark keeps. A mark is
+    /// blind to a rewrite that keeps both — a same-length edit that puts the
+    /// timestamp back, or any same-length rewrite inside the second an HFS+
+    /// volume stamps — and a save that trusted one would replace exactly those.
+    /// The fingerprint is every byte through Swift's Hasher: 64 bits, seeded per
+    /// process, which is all it needs because it is only ever compared within
+    /// one run. Two different files can collide; at that probability it is a
+    /// worse bet than the disk failing.
+    ///
+    /// The bytes on disk, not the text in the page. An iA Writer document keeps
+    /// its authorship block in the file and out of the page, and a base taken
+    /// from the page would make every save of one look like somebody else's
+    /// write.
+    ///
+    /// Nor is it the tab's digest, though the two usually agree. That one is the
+    /// look's: a fingerprint of text, kept on main, asking whether a rewrite
+    /// says anything new. This one is the save's, and the save needs two things
+    /// the digest cannot give it. It has to be shared with every save the tab
+    /// has out, because the app's own saves overlap — ⌘S or a presenter's
+    /// flush can go out while an autosave is still waiting its turn — and each
+    /// save moves the base on to what it wrote while it still holds the file,
+    /// so the next one in line finds its predecessor's bytes expected rather
+    /// than taking them for a stranger's. And it has to know which text a save
+    /// is carrying: see Ticket.
+    final class Base {
+        private let lock = NSLock()
+        /// The fingerprint of the version the text on screen answers to. nil
+        /// until the tab has read or written something, and a save that
+        /// expects nothing can vouch for nothing: it is refused unless the file
+        /// already says exactly what it would write.
+        private var expected: Int?
+        /// Moves on whenever the text on screen stops answering to what it
+        /// did: a reload, or an answer to the changed-on-disk question.
+        private var lineage = 0
+        /// Every change to `expected`, from anywhere. See agree(with:).
+        private var moves = 0
+
+        /// One version of a file, as this run of the app will recognise it.
+        static func fingerprint(_ bytes: Data) -> Int {
+            var hasher = Hasher()
+            bytes.withUnsafeBytes { hasher.combine(bytes: $0) }
+            return hasher.finalize()
+        }
+
+        /// What a save takes from its document along with the text it writes.
+        ///
+        /// Taken before the text is asked for, not when it arrives. The page
+        /// answers in its own time, and a Reload landing in between would
+        /// otherwise pair the new lineage with the old words — which would let
+        /// through the very write the lineage is there to stop: the writer's
+        /// discarded text, put back over the version they chose instead.
+        struct Ticket {
+            let base: Base
+            fileprivate let lineage: Int
+
+            /// Asked inside the write's claim, as close to the swap as it can
+            /// be put. `now` is the fingerprint of what is on disk this moment.
+            fileprivate func verdict(onDisk now: Int, writing payload: Int) -> Verdict {
+                base.verdict(lineage, onDisk: now, writing: payload)
+            }
+
+            /// A save carrying this ticket replaced the file.
+            fileprivate func wrote(_ payload: Int) { base.wrote(payload) }
+        }
+
+        func ticket() -> Ticket {
+            lock.lock(); defer { lock.unlock() }
+            return Ticket(base: self, lineage: lineage)
+        }
+
+        /// The text on screen now answers to this version of the file: it has
+        /// just been read into the tab, or the writer has just said which of two
+        /// versions wins. A save still out with text from before is refused
+        /// when it reaches the file, however well the disk matches, because it
+        /// is carrying words the writer has since been shown something else in
+        /// place of — or has chosen over something they have now seen.
+        func rebase(to fingerprint: Int?) {
+            lock.lock(); defer { lock.unlock() }
+            expected = fingerprint
+            lineage += 1
+            moves += 1
+        }
+
+        /// How many times the base has moved, for agree(with:) to be taken
+        /// against.
+        var moved: Int {
+            lock.lock(); defer { lock.unlock() }
+            return moves
+        }
+
+        /// A look found the file saying what the tab already says, in bytes
+        /// that may not be the ones expected — rewritten into another encoding,
+        /// or normalised. There is nothing to ask about there and nothing to
+        /// reload, but a base left on the old bytes would refuse every save
+        /// from then on with nobody ever asked, so it moves to what the look
+        /// read. Only if no save of ours has landed since the look went out: a
+        /// look that started before one of our writes has older news than the
+        /// write does.
+        func agree(with fingerprint: Int?, unlessMovedSince mark: Int) {
+            lock.lock(); defer { lock.unlock() }
+            guard moves == mark else { return }
+            expected = fingerprint
+            moves += 1
+        }
+
+        /// What one save finds, with the file held.
+        enum Verdict {
+            /// The file is the version the text was made from, or one of this
+            /// tab's own saves of it since. Replace it.
+            case replace
+            /// The file already says exactly what this save would write:
+            /// somebody else made the same change, or this is the same text
+            /// again. Nothing to write, and that is the version now.
+            case already
+            /// Something else changed the file since the text was made from
+            /// it. Nothing is written.
+            case changed
+            /// The text this save carries is not the text on screen any more.
+            /// Nothing is written.
+            case superseded
+        }
+
+        private func verdict(_ lineage: Int, onDisk now: Int, writing payload: Int) -> Verdict {
+            lock.lock(); defer { lock.unlock() }
+            guard lineage == self.lineage else { return .superseded }
+            if now == payload {
+                expected = payload
+                moves += 1
+                return .already
+            }
+            return now == expected ? .replace : .changed
+        }
+
+        /// Still inside the claim, so the next save in line sees it.
+        private func wrote(_ payload: Int) {
+            lock.lock(); defer { lock.unlock() }
+            expected = payload
+            moves += 1
+        }
     }
 
     /// Where a coordinated write's body runs once the file is really ours.
@@ -717,6 +888,15 @@ enum Coordinated {
     static func busy(_ url: URL) -> String {
         "“\(url.lastPathComponent)” is being written by something else right now. It was not "
         + "opened, because what is in the file at this moment is only part of it."
+    }
+
+    /// And what there is to say when a save found the file changed under it.
+    /// It reaches the status bar and a toast, and it says what did NOT happen,
+    /// because that is the part the writer needs: nothing was written over, and
+    /// the text on screen is still theirs to keep or let go.
+    static func changed(_ url: URL) -> String {
+        "“\(url.lastPathComponent)” was changed by something else after it was last opened or "
+        + "saved here, so it has not been saved over. Nothing is lost: choose which version to keep."
     }
 
     private static let domain = "minimark.coordination"
@@ -2343,6 +2523,21 @@ final class DocTab {
     var missing = 0
     var missingSince: Date?
 
+    /// The version of the file this document's text was made from, shared
+    /// with every save it sends out, and checked by each of them with the file
+    /// held. See Coordinated.Base.
+    let base = Coordinated.Base()
+
+    /// True from the moment a save of this document is refused because the
+    /// file changed under it, until somebody has said which version wins — or a
+    /// look has found there was nothing to choose between after all. The text
+    /// on screen is kept, the tab stays dirty, and the autosave stops aiming at
+    /// the file and puts the writing in the crash-insurance buffer instead,
+    /// the same as for a document with no file: trying the file again every
+    /// second would only take the claim from everybody else to be refused
+    /// again, and any typing in the meantime would be insured nowhere.
+    var conflicted = false
+
     /// Whether there is a file to save into. A document that has never been
     /// saved has none, and neither does one whose file has gone — so both of
     /// them autosave into the crash-insurance buffer instead of onto a path,
@@ -2651,6 +2846,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
         let group = DispatchGroup()
         var failed: [String] = []
+        // The ones that were not written because something else had changed
+        // the file, which is a different sentence from a folder that has gone
+        // away and a different thing to do about it.
+        var changed = 0
 
         for tab in onDisk {
             guard let url = tab.url else { continue }
@@ -2659,15 +2858,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             let finish: (Bool) -> Void = { wrote in
                 if settled { return }
                 settled = true
-                if !wrote { failed.append(url.lastPathComponent) }
+                if !wrote {
+                    failed.append(url.lastPathComponent)
+                    if tab.conflicted { changed += 1 }
+                }
                 group.leave()
             }
             // If the web layer cannot produce the text, leave the file as it
             // is rather than replacing it with nothing — and say so, rather
-            // than quitting quietly over the top of the loss.
+            // than quitting quietly over the top of the loss. A document whose
+            // file changed under it is tried as well rather than skipped: the
+            // check inside the write is the one that knows, and if it still
+            // says no, the quit stops and the question is asked.
+            let ticket = tab.base.ticket()
             fetchText(tab.id) { text in
                 guard let text = text else { finish(false); return }
-                self.write(text, to: url, silent: true) { wrote in finish(wrote) }
+                self.write(text, to: url, expecting: ticket, silent: true) { wrote in finish(wrote) }
             }
             // Same watchdog reasoning as the history fetch: this round trip
             // goes through the WebContent process, and if that is killed
@@ -2684,8 +2890,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 alert.messageText = failed.count == 1
                     ? "Could not save “\(failed[0])”"
                     : "Could not save \(failed.count) documents"
-                alert.informativeText = "minimark has stopped quitting so the changes are not lost. "
-                    + "Check the folder is still available, then try again."
+                alert.informativeText = changed == failed.count
+                    ? "Something else changed \(changed == 1 ? "it" : "them") on disk since "
+                      + "\(changed == 1 ? "it was" : "they were") last saved here, so minimark has "
+                      + "not saved over that, and has stopped quitting so nothing is lost. "
+                      + "Choose which version to keep, then quit again."
+                    : "minimark has stopped quitting so the changes are not lost. "
+                      + "Check the folder is still available, then try again."
                 alert.addButton(withTitle: "OK")
                 alert.runModal()
                 self.replyToTerminate(false)
@@ -3262,12 +3473,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     /// Bring a tab to the front. Safe to call for the tab already in front:
     /// the web layer reconciles rather than reloading, so nothing is disturbed.
     func activate(_ id: Int) {
-        guard tab(id) != nil else { return }
+        guard let front = tab(id) else { return }
         activeID = id
         syncWindowToTab()
         pushTabs()
         pushEncoding()
         saveSession()
+        // A document whose save was refused while it was in the background has
+        // a question waiting, and this is the first moment there is somebody
+        // in front of it to ask. Soon rather than at the next poll.
+        if front.conflicted { lookSoon() }
     }
 
     /// Whether the process may be killed outright at logout or restart rather
@@ -3373,13 +3588,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         guard tab.dirty else { done(true); return }
 
         if let url = tab.url, tab.hasFile {
+            let ticket = tab.base.ticket()
             fetchText(tab.id) { text in
                 // The write is issued and the tab goes. Coordination can take
                 // as long as the other writer needs it to, and holding a tab
                 // open on that would be a window that will not close; the text
                 // has already been captured, the write will land when the file
-                // is free, and insureSlowSave has it in the meantime.
-                if let text = text { self.write(text, to: url) }
+                // is free, and insureSlowSave has it in the meantime. If the
+                // file turns out to have changed under it, the write is refused
+                // like any other save and the text comes back in a tab of its
+                // own: see refusedOverChange.
+                if let text = text { self.write(text, to: url, expecting: ticket) }
                 done(true)
             }
             return
@@ -3594,6 +3813,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                         tab.encoding = file.encoding
                         tab.encodingGuessed = file.guessed
                         tab.digest = DocTab.digest(of: file.text)
+                        tab.base.rebase(to: file.fingerprint)
                         tab.authorship = Authorship.split(file.text)
                         self.nextTabID += 1
                         sit(tab, seat, tab.authorship?.body ?? file.text)
@@ -3670,6 +3890,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         let encoding: String.Encoding
         /// True when nothing identified the encoding and Latin-1 was assumed.
         let guessed: Bool
+        /// The bytes this text was decoded from, as a save of it will expect to
+        /// find them. See Coordinated.Base.
+        var fingerprint: Int? = nil
 
         var label: String {
             let name: String
@@ -3735,12 +3958,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private func decodeTextFile(_ url: URL) -> TextFile? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         if looksBinary(data) { return nil }
+        // Of these bytes, in this read, so that what a save of the document
+        // later expects to find is exactly what the writer was shown.
+        let read = Coordinated.Base.fingerprint(data)
 
         // UTF-8 first and strictly. String(data:encoding:) returns nil on a
         // byte sequence that is not valid UTF-8, which is the check the old
         // code was missing.
         if let s = String(data: data, encoding: .utf8) {
-            return TextFile(text: s, encoding: .utf8, guessed: false)
+            return TextFile(text: s, encoding: .utf8, guessed: false, fingerprint: read)
         }
         // A byte-order mark is the one time a file states its own encoding.
         for (bom, enc) in [([0xFF, 0xFE, 0x00, 0x00], String.Encoding.utf32LittleEndian),
@@ -3749,18 +3975,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                            ([0xFE, 0xFF], .utf16BigEndian)] {
             if data.starts(with: bom.map { UInt8($0) }),
                let s = String(data: data, encoding: enc) {
-                return TextFile(text: s, encoding: enc, guessed: false)
+                return TextFile(text: s, encoding: enc, guessed: false, fingerprint: read)
             }
         }
         // Then whatever the system can tell us, which includes the encoding
         // recorded in the file's extended attributes by other Mac editors.
         var used = String.Encoding.utf8
         if let s = try? String(contentsOf: url, usedEncoding: &used) {
-            return TextFile(text: s, encoding: used, guessed: false)
+            return TextFile(text: s, encoding: used, guessed: false, fingerprint: read)
         }
         // Last, and never fails.
         if let s = String(data: data, encoding: .isoLatin1) {
-            return TextFile(text: s, encoding: .isoLatin1, guessed: true)
+            return TextFile(text: s, encoding: .isoLatin1, guessed: true, fingerprint: read)
         }
         return nil
     }
@@ -3786,6 +4012,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         /// wants a different answer and a different sentence, so it is kept
         /// apart from `failed` rather than folded into it.
         case vanished(String)
+        /// Something else wrote the file after this document last read or
+        /// saved it, and this save would have replaced that unseen, so nothing
+        /// was written. Not a failure either: the file is fine and so is the
+        /// text, and trying again a second later answers nothing. It wants a
+        /// person to say which version wins. See Coordinated.Base.
+        case conflict(String)
+        /// The text this save carried stopped being the document's before the
+        /// save reached the file — a reload, or an answer to the changed-on-disk
+        /// question, came in between. Nothing was written, and there is nothing
+        /// to report: whatever the document holds now is saved on its own.
+        case superseded
     }
 
     /// Every extended attribute the file at `src` carries, copied onto `dst`.
@@ -3832,13 +4069,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     /// The inode still changes and a hard link still breaks. That is simply
     /// what an atomic replace is — iA Writer does the same — and the trade the
     /// other way is a half-written document after a power cut.
-    private static func replaceContents(of url: URL, with data: Data) throws {
+    ///
+    /// `lastLook` is asked once, after everything slow is done and immediately
+    /// before the swap, and nothing is replaced unless it says yes. It is where
+    /// a save checks the file is still the version its text was made from, and
+    /// it goes here rather than before the staging because that check is only
+    /// airtight against writers that coordinate. git, vim and cp do not, and
+    /// for them the gap between looking and swapping is a gap they can land
+    /// in. Staging first leaves that gap at one read, one hash and one rename.
+    /// Narrower is all it can be made; see writeToDisk for what is left.
+    ///
+    /// Returns whether the file was replaced.
+    private static func replaceContents(of url: URL, with data: Data,
+                                        lastLook: () -> Bool) throws -> Bool {
         let fm = FileManager.default
         // Nothing there yet: a Save As, or a file being created. No metadata to
         // keep, and the ordinary atomic write is already the right answer.
         guard let was = try? fm.attributesOfItem(atPath: url.path) else {
+            guard lastLook() else { return false }
             try data.write(to: url, options: .atomic)
-            return
+            return true
         }
 
         let token = String(UInt32.random(in: 0 ... .max), radix: 16)
@@ -3854,6 +4104,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             // When the document came into being is not a fact about this save.
             if let born = was[.creationDate] { keep[.creationDate] = born }
             if !keep.isEmpty { try? fm.setAttributes(keep, ofItemAtPath: staged.path) }
+            guard lastLook() else {
+                try? fm.removeItem(at: staged)
+                return false
+            }
             // .usingNewMetadataOnly, because the metadata that matters is
             // now on the staging file and that is the copy this option keeps.
             // Neither option is right on its own: measured, this one leaves
@@ -3865,6 +4119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             try? fm.removeItem(at: staged)
             throw error
         }
+        return true
     }
 
     /// The half that touches the disk. No app state is read or written here, so
@@ -3885,8 +4140,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     /// a file waiting to be made or a document that has gone is the one thing
     /// this cannot work out for itself, and a default would let a call site
     /// answer it by not thinking about it.
+    ///
+    /// Nor has `expecting`, for the same reason: it is the ticket the save took
+    /// from its document along with the text, and a save of a document that is
+    /// already on disk replaces nothing unless the file is still the version
+    /// that text was made from — or one of this document's own saves since.
+    /// The check is made with the file held, after the new bytes are staged and
+    /// immediately before the swap, so no coordinating writer can land between
+    /// the look and the replace. A file that changed comes back as `conflict`
+    /// and is left exactly as it was; the caller decides who to ask. A save
+    /// that makes a file checks nothing — Save As has already asked about
+    /// anything in the way — but still moves the ticket's base on to what it
+    /// wrote, so the document's next save expects its own file.
+    ///
+    /// What is still open: a writer that does not coordinate — git, vim, cp —
+    /// can land in the gap between the last look and the rename, and is then
+    /// replaced unseen as it always was. The gap is one read, one hash and one
+    /// rename now rather than the length of a save, and it is not zero.
     static func writeToDisk(_ text: String, to url: URL, encoding want: String.Encoding,
                             intent: Coordinated.Intent,
+                            expecting ticket: Coordinated.Base.Ticket?,
                             presenter: NSFilePresenter?,
                             done: @escaping (WriteOutcome, URL) -> Void) {
         // Which encoding wins is settled before anything touches the disk, so
@@ -3918,9 +4191,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         // write would be racing the copy it had just uploaded.
         Coordinated.write(url, intent: intent, presenter: presenter, { u in
             landed = u
+            let payload = Coordinated.Base.fingerprint(data)
+            // Why the last look said no, when it did.
+            var refused: WriteOutcome?
             do {
-                try replaceContents(of: u, with: data)
-                outcome = .wrote(promoted: promoted)
+                let swapped = try replaceContents(of: u, with: data) {
+                    guard intent == .update, let ticket = ticket else { return true }
+                    // Read whole, with the claim still held. A file that cannot
+                    // be read cannot be vouched for, and is not saved over.
+                    guard let now = try? Data(contentsOf: u) else {
+                        refused = FileManager.default.fileExists(atPath: u.path)
+                            ? .failed("“\(u.lastPathComponent)” could not be read to check that "
+                                      + "nothing else had changed it, so it was not saved over.")
+                            : .vanished(Coordinated.gone(u))
+                        return false
+                    }
+                    switch ticket.verdict(onDisk: Coordinated.Base.fingerprint(now), writing: payload) {
+                    case .replace:    return true
+                    case .already:    refused = .wrote(promoted: promoted)
+                    case .changed:    refused = .conflict(Coordinated.changed(u))
+                    case .superseded: refused = .superseded
+                    }
+                    return false
+                }
+                if swapped {
+                    ticket?.wrote(payload)
+                    outcome = .wrote(promoted: promoted)
+                } else if let refused = refused {
+                    outcome = refused
+                }
             } catch {
                 outcome = .failed(error.localizedDescription)
             }
@@ -3987,7 +4286,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     ///
     /// `carrying` is the tab whose authorship goes with the text when that is
     /// not the tab at `url`: Save As, whose tab is not at its new path yet.
-    func write(_ text: String, to url: URL, intent: Coordinated.Intent = .update,
+    ///
+    /// `expecting` is the ticket the caller took from the document before it
+    /// asked the page for `text`, and it has no default: every save says what
+    /// its text was made from, or a call site could skip the one check that
+    /// stands between a save and somebody else's work. See writeToDisk.
+    func write(_ text: String, to url: URL, expecting ticket: Coordinated.Base.Ticket?,
+               intent: Coordinated.Intent = .update,
                silent: Bool = false, tab: DocTab? = nil, carrying source: DocTab? = nil,
                done: @escaping (Bool) -> Void = { _ in }) {
         let target = tab ?? tabs.first { $0.url?.standardizedFileURL == url.standardizedFileURL }
@@ -3996,10 +4301,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         AppDelegate.writeToDisk(onDisk, to: url,
                                 encoding: target?.encoding ?? .utf8,
                                 intent: intent,
+                                expecting: ticket,
                                 presenter: presenter(for: url)) { outcome, landed in
             insurance?.cancel()
             if case .wrote = outcome { commit() }
-            done(self.applyWrite(outcome, to: landed, wrote: onDisk, silent: silent, tab: target))
+            done(self.applyWrite(outcome, to: landed, wrote: onDisk, page: text,
+                                 silent: silent, tab: target))
         }
     }
 
@@ -4023,7 +4330,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     /// The autosave's write: the same one, plus the check only the autosave
     /// needs, and the flag that keeps it from stacking.
+    ///
+    /// `done` runs for every write that reached the file, and not for one
+    /// whose text was replaced on screen before it got there: that is neither
+    /// a save to count nor a failure to count towards saying so, and whatever
+    /// the document holds now is scheduled on its own.
     func writeFromAutosave(_ text: String, to url: URL, tab: DocTab,
+                           expecting ticket: Coordinated.Base.Ticket,
                            done: @escaping (Bool) -> Void) {
         let insurance = insureSlowSave(tab, text)
         let (onDisk, commit) = carryAuthorship(text, for: tab)
@@ -4032,6 +4345,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         // disk, and it is the one write that must never be able to make a file.
         AppDelegate.writeToDisk(onDisk, to: url, encoding: tab.encoding,
                                 intent: .update,
+                                expecting: ticket,
                                 presenter: presenter(for: url)) { outcome, landed in
             insurance.cancel()
             tab.saving = false
@@ -4046,19 +4360,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 return
             }
             if case .wrote = outcome { commit() }
-            done(self.applyWrite(outcome, to: landed, wrote: onDisk, silent: true, tab: tab))
+            let ok = self.applyWrite(outcome, to: landed, wrote: onDisk, page: text,
+                                     silent: true, tab: tab)
+            if case .superseded = outcome {
+                self.scheduleAutosave()
+                return
+            }
+            done(ok)
         }
     }
 
     /// Everything a finished write means to the app: what the file now looks
     /// like and says, the promotion to UTF-8, and who gets told. Main thread
     /// only.
+    ///
+    /// `text` is what went to disk and `page` is what the page gave, which are
+    /// different for a document carrying iA Writer's authorship block. The
+    /// stamp records the first, because that is what the file says; anything
+    /// put somewhere safe keeps the second, because that is what goes back
+    /// into a page.
     private func applyWrite(_ outcome: WriteOutcome, to url: URL, wrote text: String,
-                            silent: Bool, tab target: DocTab?) -> Bool {
+                            page: String, silent: Bool, tab target: DocTab?) -> Bool {
         switch outcome {
         case .wrote(let promoted):
             stampFile(url, text: text)             // don't watch our own write back in
             if let target = target {
+                // On disk, so nothing is standing between this document and its
+                // file any more, whatever stood there before.
+                target.conflicted = false
                 // The writing is on disk, so the insurance taken out against
                 // this save being slow is not needed and must not be left in
                 // the folder for the next launch to offer back. Both of these
@@ -4104,7 +4433,139 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             if let target = target { documentVanished(target, why: why) }
             if !silent { presentError("Could not save “\(url.lastPathComponent)”", why) }
             return false
+        case .conflict(let why):
+            // Not stamped, and that is the whole of the fix as far as the look
+            // is concerned: a stamp here would tell the next look the file says
+            // what this save wrote, and this save wrote nothing.
+            if let target = target { refusedOverChange(target, page: page, why: why, asking: !silent) }
+            return false
+        case .superseded:
+            // Whatever replaced this save's text has said what the file is. If
+            // that left nothing unsaved, the insurance this save took out is
+            // insuring words the writer has chosen not to keep.
+            if let target = target, !target.dirty { target.forgetScratch() }
+            return false
         }
+    }
+
+    /// A save that found its file changed since this document last read or
+    /// wrote it, and so wrote nothing.
+    ///
+    /// The writer's text is kept on screen and put in the crash-insurance
+    /// buffer at once, because until somebody says which version wins it has
+    /// nowhere else to be. The status bar says "not saving", with the reason on
+    /// hover, which is still true and still on screen after any toast has
+    /// gone. And the question is the one the app already asks — "changed on
+    /// disk", Reload or Keep Mine — reached the way the poll reaches it, so
+    /// every rule about who is asked when stays in one place: only the document
+    /// in front, only with the window up, one question at a time, and a
+    /// document in the background asked when it comes forward.
+    ///
+    /// `stirred` is what gets it asked at all when the file's mark says nothing
+    /// moved — a same-length rewrite with its timestamp put back. It makes the
+    /// next look read the file rather than trust the mark.
+    ///
+    /// `asking` is for ⌘S, where somebody is waiting for an answer, so the look
+    /// happens now rather than a beat later.
+    private func refusedOverChange(_ tab: DocTab, page text: String, why: String, asking: Bool) {
+        // Closed while its save was out: closing writes and lets the tab go
+        // without waiting, because coordination can take as long as the other
+        // writer likes. That leaves the one refusal with no document to keep
+        // the writing in, and a closed tab is exactly where nobody would think
+        // to look for it. So it gets a tab of its own.
+        guard tabs.contains(where: { $0 === tab }) else {
+            let aside = keepAside(text, authorship: tab.authorship,
+                                  named: asideName(tab, "not saved"), after: activeTab)
+            // The buffer it may have left behind is the same words again.
+            tab.forgetScratch()
+            toast("“\(tab.name)” changed on disk, so closing it saved nothing over that — "
+                  + "your text is in “\(aside.name)”")
+            return
+        }
+        tab.conflicted = true
+        tab.stirred = true
+        tab.lastSaveError = why
+        if text != tab.scratchText, Scratch.write(text, id: tab.scratchID) { tab.scratchText = text }
+        if !tab.saveTroubleShown {
+            tab.saveTroubleShown = true
+            js("if(window.App&&App.saveTrouble)App.saveTrouble(\(tab.id),\(jsLiteral(why)))")
+        }
+        if asking { checkFileOnDisk() } else { lookSoon() }
+    }
+
+    /// Nothing stands between the document and its file any more: the writer
+    /// kept their version over the one on disk, or a look found the two were
+    /// the same after all. It goes back to being saved like any other, and the
+    /// save is asked for now, because a refused autosave does not reschedule
+    /// itself and the writer may well have stopped typing. What that save does
+    /// is still up to the file: if it has changed yet again, it is refused and
+    /// asked about again.
+    private func conflictCleared(_ tab: DocTab) {
+        tab.conflicted = false
+        scheduleAutosave()
+    }
+
+    /// The document now says what its file says. What the writer had is either
+    /// beside it in a tab of its own — Reload puts it there before calling this
+    /// — or was never there to lose, for a document reloaded with nothing
+    /// unsaved. Either way the insurance this tab kept is dropped rather than
+    /// offered back at the next launch as though it had been lost, and "not
+    /// saving" stops being true.
+    private func conflictDiscarded(_ tab: DocTab) {
+        let was = tab.conflicted
+        tab.conflicted = false
+        tab.forgetScratch()
+        guard was, tab.saveTroubleShown else { return }
+        tab.saveTroubleShown = false
+        tab.saveFailures = 0
+        tab.lastSaveError = nil
+        js("if(window.App&&App.saveTrouble)App.saveTrouble(\(tab.id),null)")
+    }
+
+    /// One version of a document, put where nobody can lose it: a tab of its
+    /// own, untitled and unsaved, next to `after`, and in the crash-insurance
+    /// folder from the moment it exists. Not brought forward — the writer is in
+    /// the middle of something, and the tab strip and a toast are enough to
+    /// say it is there. Closing it asks, like any document never saved.
+    ///
+    /// For the version a choice or a refusal would otherwise leave nowhere:
+    /// the file's, when the writer keeps theirs over it, and the writer's, when
+    /// a tab closed with its save refused.
+    @discardableResult
+    private func keepAside(_ text: String, authorship: Authorship?, named name: String,
+                           after neighbour: DocTab?) -> DocTab {
+        let aside = makeTab(url: nil)
+        aside.placeholder = name
+        aside.authorship = authorship
+        aside.dirty = true
+        if Scratch.write(text, id: aside.scratchID) { aside.scratchText = text }
+        let at = neighbour.flatMap { n in tabs.firstIndex { $0 === n } }.map { $0 + 1 } ?? tabs.count
+        tabs.insert(aside, at: at)
+        // The text before the list, for the reason openDocument gives: the
+        // page parks a document named against a tab that is not in front.
+        js("if(window.App)App.loadDoc(\(jsLiteral(text)),\(jsLiteral(aside.name)),"
+           + "\(jsLiteral(aside.dir)),\(aside.id))")
+        pushTabs()
+        window?.isDocumentEdited = true
+        suddenTermination()
+        saveSession()
+        return aside
+    }
+
+    /// "notes (on disk).md" for a document called notes.md, and a number after
+    /// it when an untitled tab already has that name.
+    private func asideName(_ tab: DocTab, _ note: String) -> String {
+        let ext = (tab.name as NSString).pathExtension
+        let stem = (tab.name as NSString).deletingPathExtension
+        let taken = Set(tabs.filter { $0.url == nil }.map { $0.placeholder })
+        let named: (String) -> String = { $0 + (ext.isEmpty ? "" : "." + ext) }
+        var name = named("\(stem) (\(note))")
+        var n = 2
+        while taken.contains(name) {
+            name = named("\(stem) (\(note)) \(n)")
+            n += 1
+        }
+        return name
     }
 
     /// Called after every autosave attempt on a tab. Counts a run of failures
@@ -4256,6 +4717,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             // What the file says, recorded now, so that the first outside
             // rewrite of it can be told from the first outside change to it.
             target.digest = DocTab.digest(of: text)
+            // And the bytes it said it in, which is what the first save of it
+            // will expect to find.
+            target.base.rebase(to: file.fingerprint)
             // iA Writer's authorship block is the tab's to keep, not the
             // page's to show. See Authorship.
             target.authorship = Authorship.split(text)
@@ -4324,6 +4788,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     func saveDocument(tab: DocTab? = nil, _ done: @escaping (Bool) -> Void) {
         guard let target = tab ?? activeTab else { done(false); return }
         guard let url = target.url, target.hasFile else { saveAs(tab: target, done); return }
+        // Before the text is asked for, like every save's: see Base.Ticket. A
+        // document whose last save was refused is tried again here rather
+        // than skipped, because somebody asked, and if the file is still not
+        // the version the text was made from, this is what asks them.
+        let ticket = target.base.ticket()
         fetchText(target.id) { text in
             guard let text = text else {
                 self.presentError("Could not save “\(url.lastPathComponent)”",
@@ -4332,7 +4801,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 done(false)
                 return
             }
-            self.write(text, to: url, tab: target) { ok in
+            self.write(text, to: url, expecting: ticket, tab: target) { ok in
                 if ok {
                     target.dirty = false
                     self.window?.isDocumentEdited = self.tabs.contains { $0.dirty }
@@ -4353,6 +4822,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         panel.isExtensionHidden = false
         panel.beginSheetModal(for: window) { response in
             guard response == .OK, let url = panel.url else { done(false); return }
+            // Nothing is checked against it — the panel has already asked about
+            // anything at that path — but it is how the document's base moves
+            // to the file it is about to be, so its next save expects its own.
+            let ticket = target.base.ticket()
             self.fetchText(target.id) { text in
                 guard let text = text else {
                     self.presentError("Could not save “\(url.lastPathComponent)”",
@@ -4363,9 +4836,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 // The one write in the app whose whole purpose is to make a
                 // file, so the one that says so. Everything else is a save of a
                 // document that is already there.
-                self.write(text, to: url, intent: .create, carrying: target) { ok in
+                self.write(text, to: url, expecting: ticket, intent: .create,
+                           carrying: target) { ok in
                     guard ok else { done(false); return }
                     target.dirty = false
+                    // Whatever the old file said, this document is the new one
+                    // now, and nothing is left to choose between.
+                    target.conflicted = false
                     self.setDocument(url, tab: target)
                     self.window?.isDocumentEdited = self.tabs.contains { $0.dirty }
                     self.suddenTermination()
@@ -4504,13 +4981,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     /// tab and switching away from it used to leave the edit unwritten until
     /// you came back — which, with several tabs open, could be never.
     func runAutosave() {
-        // Dirty with nowhere on disk to go — never saved, or saved to a file
-        // that is not there any more — so it is written somewhere the next
-        // launch can find it instead. The tab stays dirty on purpose: this is
-        // not a save, and quit still has to ask.
-        for tab in tabs where tab.dirty && !tab.hasFile {
+        // Dirty with nowhere on disk to go — never saved, saved to a file that
+        // is not there any more, or refused by a file that changed under it
+        // and waiting for somebody to say which version wins — so it is
+        // written somewhere the next launch can find it instead. The tab stays
+        // dirty on purpose: this is not a save, and quit still has to ask.
+        for tab in tabs where tab.dirty && (!tab.hasFile || tab.conflicted) {
             fetchText(tab.id) { text in
-                guard let text = text, !tab.hasFile else { return }
+                guard let text = text, !tab.hasFile || tab.conflicted else { return }
                 guard text != tab.scratchText else { return }
                 // Empty is not worth insuring, and leaving the old file there
                 // would offer back a page the writer has since cleared.
@@ -4536,9 +5014,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         // moment would create the name the document has just left. `hasFile`
         // is the same sentence about a document that has gone for good rather
         // than for a moment: it is above, being insured, not here being aimed
-        // at a name nothing is at.
-        for tab in tabs where tab.dirty && tab.hasFile && !tab.saving && !tab.renaming {
+        // at a name nothing is at. `conflicted` is the same again: its file
+        // has something in it this document has not seen, and it is above,
+        // being insured, until somebody says which version wins.
+        for tab in tabs where tab.dirty && tab.hasFile && !tab.conflicted
+                              && !tab.saving && !tab.renaming {
             guard let url = tab.url else { continue }
+            // Before the text is asked for. See Base.Ticket.
+            let ticket = tab.base.ticket()
             fetchText(tab.id) { text in
                 // Silent on failure: autosave runs unprompted, so an alert here
                 // would interrupt typing. The file keeps its last good contents
@@ -4558,7 +5041,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 // typing on to wait for Dropbox is the stall this whole change
                 // exists to avoid causing.
                 let generation = tab.edits
-                self.writeFromAutosave(text, to: url, tab: tab) { ok in
+                self.writeFromAutosave(text, to: url, tab: tab, expecting: ticket) { ok in
                     guard ok else {
                         self.noteAutosave(tab, ok: false)
                         return
@@ -4870,12 +5353,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         // knows is empty, and writing our text into it first would recreate the
         // name rather than answer the question. `done` still runs, because
         // somebody is waiting on it either way.
+        //
+        // A flush is a save, and gets the same check as every other: see
+        // writeToDisk. `conflicted` means the check has already said no and
+        // nobody has answered yet, so the other process reads what is on disk
+        // — which is what it would read after a refused flush anyway, without
+        // this app taking the file from everybody first to find that out.
         guard let tab = tabs.first(where: { $0.url?.standardizedFileURL == target }),
-              tab.dirty, tab.hasFile else { done(); return }
+              tab.dirty, tab.hasFile, !tab.conflicted else { done(); return }
+        let ticket = tab.base.ticket()
         fetchText(tab.id) { text in
             guard let text = text, let live = tab.url,
                   live.standardizedFileURL == target else { done(); return }
-            self.write(text, to: live, silent: true, tab: tab) { ok in
+            self.write(text, to: live, expecting: ticket, silent: true, tab: tab) { ok in
                 if ok {
                     self.noteAutosave(tab, ok: true)
                     tab.dirty = false
@@ -4964,14 +5454,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             // Nothing unsaved here, so there is nothing to decide: take the
             // new text, whether or not this is the document on screen.
             guard tab.dirty else {
-                reread(tab, at: url, seenAt: now) { text, kept in
+                reread(tab, at: url, seenAt: now) { text, kept, read in
                     // Unless somebody typed in it while the read was out. That
                     // was impossible when this was synchronous and it is one
                     // keystroke away now, and loading over it would throw away
                     // a sentence nobody has a copy of. Left unhandled on
                     // purpose: the next pass finds the tab dirty and asks.
+                    //
+                    // And the next save is what makes sure of that. A save of
+                    // the typing lands on a file this tab has not taken in yet,
+                    // and the base still says so, so the save is refused and
+                    // the question asked — rather than the save quietly
+                    // replacing what this read found and its stamp telling the
+                    // next pass there had been nothing to ask about.
                     guard !tab.dirty else { return false }
                     tab.authorship = kept
+                    tab.base.rebase(to: read)
+                    self.conflictDiscarded(tab)
                     self.js("if(window.App)App.externalChange(\(jsLiteral(text)),\(tab.id))")
                     return true
                 }
@@ -4989,7 +5488,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             // round every two seconds. Without this the same change would ask
             // twice — or the second sheet would arrive on top of the first.
             reloadPromptUp = true
-            reread(tab, at: url, seenAt: now) { text, kept in
+            reread(tab, at: url, seenAt: now) { text, kept, read in
                 // The window and the front tab were both checked on the way
                 // out, and a read can be out for a while. Anything that has
                 // changed since means there is no longer a question to ask, or
@@ -4999,17 +5498,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                       tab.id == self.activeID, tab.dirty else { return false }
                 let alert = NSAlert()
                 alert.messageText = "“\(url.lastPathComponent)” changed on disk"
-                alert.informativeText = "You have unsaved changes here. Reload the file and discard them, or keep what is on screen?"
+                alert.informativeText = "You have unsaved changes here. Reload the file, or keep what "
+                    + "is on screen and save it over the file? Either way the version you do not keep "
+                    + "opens in a tab of its own, so neither is lost."
                 alert.addButton(withTitle: "Reload")
                 alert.addButton(withTitle: "Keep Mine")
+                // Until this is answered the document's base stays where it
+                // was, so a save arriving while the sheet is up — the autosave
+                // of a keystroke typed just before it, a presenter's flush — is
+                // refused rather than deciding the question for the writer.
                 alert.beginSheetModal(for: window) { response in
                     self.reloadPromptUp = false
-                    guard response == .alertFirstButtonReturn else { return }
+                    guard self.tabs.contains(where: { $0 === tab }) else { return }
+                    // Either answer says what the text on screen now answers
+                    // to: the version read here. A save still out from before
+                    // the answer is refused when it reaches the file, whichever
+                    // way the answer went. If the file has moved on again since
+                    // this read, the next save finds that and asks again, about
+                    // the version the writer has not seen.
+                    tab.base.rebase(to: read)
+                    guard response == .alertFirstButtonReturn else {
+                        // Keep Mine. The tab keeps the block that goes with
+                        // what is on screen, and its text goes over the file —
+                        // but not before the version it replaces has somewhere
+                        // to be, because that is somebody's work too and this
+                        // is the moment it would otherwise be gone for good.
+                        let aside = self.keepAside(text, authorship: kept,
+                                                   named: self.asideName(tab, "on disk"), after: tab)
+                        self.toast("The version from disk is in “\(aside.name)”")
+                        self.conflictCleared(tab)
+                        return
+                    }
+                    // Reload. The file's version wins the document — but the
+                    // page the writer had goes into a tab of its own first,
+                    // for the same reason the other button sets the file's
+                    // version aside: it is somebody's work, and this is the
+                    // moment it would otherwise be gone. Keep Mine already
+                    // kept both, and a tab closed mid-save already keeps the
+                    // writing it could not save; Reload was the one way left
+                    // to destroy the page somebody had just typed, which is
+                    // the one loss this file says is not recoverable.
+                    //
+                    // From the insurance rather than the page: the refusal put
+                    // it there, so there is nothing to ask the web layer for,
+                    // and nothing to get wrong while the sheet comes down.
+                    if let mine = tab.scratchText, !mine.isEmpty, mine != text {
+                        let aside = self.keepAside(mine, authorship: tab.authorship,
+                                                   named: self.asideName(tab, "yours"), after: tab)
+                        self.toast("Your version is in “\(aside.name)”")
+                    }
                     tab.dirty = false
                     self.window?.isDocumentEdited = self.tabs.contains { $0.dirty }
                     self.suddenTermination()
-                    // Keep Mine keeps the block that goes with what is on screen.
                     tab.authorship = kept
+                    self.conflictDiscarded(tab)
                     self.js("if(window.App)App.externalChange(\(jsLiteral(text)),\(tab.id))")
                 }
                 return true
@@ -5059,10 +5601,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     /// that says exactly what it said before. The look still counts as
     /// finished, because it was: this is what the file says and the tab now
     /// knows it.
+    ///
+    /// `use` is also handed the fingerprint of the bytes that were read, and
+    /// moving the document's base to it is the caller's business rather than
+    /// this function's: a reload moves it at once, and the question moves it
+    /// only when it has been answered.
     private func reread(_ tab: DocTab, at url: URL, seenAt: FileMark,
-                        _ use: @escaping (String, Authorship?) -> Bool,
+                        _ use: @escaping (String, Authorship?, Int?) -> Bool,
                         otherwise: (() -> Void)? = nil) {
         tab.reading = true
+        // Taken as the read goes out, so that a save of ours landing while it
+        // is out is not undone by the older news this brings back. See
+        // Base.agree.
+        let moved = tab.base.moved
         readTextFile(url) { outcome in
             tab.reading = false
             guard case .text(let file) = outcome,
@@ -5079,6 +5630,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 tab.encodingGuessed = file.guessed
                 tab.mark = seenAt
                 tab.stirred = false
+                // And so are the bytes, for the same reason from the other
+                // side: a save expecting the old ones would take this rewrite
+                // for somebody else's work and refuse, every time, with nothing
+                // to ask anybody about.
+                tab.base.agree(with: file.fingerprint, unlessMovedSince: moved)
+                // Which is also the answer to a save that was refused over
+                // this: there was nothing to choose between after all.
+                if tab.conflicted { self.conflictCleared(tab) }
                 otherwise?()
                 return
             }
@@ -5086,7 +5645,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             // which block the tab keeps depends on whether the page takes this
             // text, and only the caller knows that, sometimes only after asking.
             let kept = Authorship.split(file.text)
-            guard use(kept?.body ?? file.text, kept) else { otherwise?(); return }
+            guard use(kept?.body ?? file.text, kept, file.fingerprint) else { otherwise?(); return }
             tab.encoding = file.encoding
             tab.encodingGuessed = file.guessed
             tab.mark = seenAt

@@ -10,7 +10,7 @@
    returned half a document — which the autosave then wrote back over the whole
    one a second later.
 
-   Seven things have to hold:
+   Eight things have to hold:
 
    1. A coordinated write actually takes the file. Two writers going at the
       same path take turns rather than interleaving, so nobody ever sees a
@@ -76,6 +76,19 @@
       not believe a file that was written moments ago until it has been left
       alone. It may wait a writer out or refuse — both are answers — but part of
       a document handed back as though it were all of it is not.
+
+   8. And a save never replaces a version of the file it has not seen. Found
+      in the running app: another process wrote the file while the writer had
+      typing unsaved, the look that would have asked about it lost the race to
+      the autosave, and the autosave replaced that write with text built on
+      the version before — then stamped its own write, so nothing ever asked.
+      So a save now checks, with the file held, that the bytes on disk are the
+      version its text was made from or one of this document's own saves
+      since, and refuses otherwise. Bytes, not the mark: a same-length rewrite
+      that puts the timestamp back is invisible to a mark and would be saved
+      straight over. And not over-eager either — our own saves, two of them out
+      at once, an iA Writer file's block, and somebody else writing exactly
+      what we were about to, all go through without a question.
 
    Like the encoding and unsaved tests, this cannot be a browser test: it is
    Swift, and it is about two processes reaching for one file. So it compiles
@@ -220,6 +233,22 @@ let url = URL(fileURLWithPath: args[2])
 /// The one thing the disk cannot answer, spelled the way the tests spell it.
 func intentNamed(_ s: String) -> Coordinated.Intent { s == "create" ? .create : .update }
 
+/// A save's outcome, the way every case below prints one.
+func describe(_ outcome: WriteOutcome, _ landed: URL) -> String {
+    switch outcome {
+    case .wrote(let promoted): return (promoted ? "promoted" : "wrote") + "\\t" + landed.lastPathComponent
+    case .failed(let why):     return "failed\\t" + why
+    case .vanished(let why):   return "vanished\\t" + why
+    case .conflict(let why):   return "conflict\\t" + why
+    case .superseded:          return "superseded\\t"
+    }
+}
+
+/// The fingerprint a tab records for the file at \`u\` as it is right now.
+func fingerprintOf(_ u: URL) -> Int? {
+    (try? Data(contentsOf: u)).map(Coordinated.Base.fingerprint)
+}
+
 // Every coordinated write is asynchronous now, and the app it lives in is an
 // app: main keeps turning while a write is out. So this keeps turning too, or
 // the answer would have nowhere to land. It is also the condition a blocking
@@ -317,6 +346,24 @@ func fileDiffers(_ tab: DocTab, _ u: URL) -> Bool {
 let sameLengthA = "the quick brown fox jumps over the lazy dog AAAA\\n"
 let sameLengthB = "the quick brown fox jumps over the lazy dog BBBB\\n"
 let sameLengthC = "the quick brown fox jumps over the lazy dog CCCC\\n"
+
+/// One save through the app's own writeToDisk, from a ticket taken off a tab's
+/// base the way the app takes one, waited for the way the app waits for one:
+/// by turning main.
+func save(_ text: String, _ ticket: Coordinated.Base.Ticket,
+          intent: Coordinated.Intent = .update) -> String {
+    let sem = DispatchSemaphore(value: 0)
+    var said = ""
+    Disk.writeToDisk(text, to: url, encoding: .utf8, intent: intent,
+                     expecting: ticket, presenter: nil) { outcome, landed in
+        said = describe(outcome, landed)
+        sem.signal()
+    }
+    pump(sem)
+    return said
+}
+func onDisk() -> String { (try? String(contentsOf: url, encoding: .utf8)) ?? "<none>" }
+func first(_ said: String) -> String { String(said.split(separator: "\\t").first ?? "") }
 
 switch args[1] {
 
@@ -485,13 +532,14 @@ case "writeasync":
 case "save":
     let sem = DispatchSemaphore(value: 0)
     var said = ""
+    // The document's base is whatever it read on opening, as the app records
+    // it: the bytes at the path now, or nothing for a file not made yet.
+    let saveTab = DocTab(id: 1, url: url)
+    saveTab.base.rebase(to: (try? Data(contentsOf: url)).map(Coordinated.Base.fingerprint))
     Disk.writeToDisk(args[3], to: url, encoding: .utf8,
-                     intent: intentNamed(args[4]), presenter: nil) { outcome, landed in
-        switch outcome {
-        case .wrote(let promoted): said = (promoted ? "promoted" : "wrote") + "\\t" + landed.lastPathComponent
-        case .failed(let why):     said = "failed\\t" + why
-        case .vanished(let why):   said = "vanished\\t" + why
-        }
+                     intent: intentNamed(args[4]), expecting: saveTab.base.ticket(),
+                     presenter: nil) { outcome, landed in
+        said = describe(outcome, landed)
         sem.signal()
     }
     pump(sem)
@@ -839,11 +887,13 @@ case "watchours":
     try? sameLengthA.write(to: url, atomically: true, encoding: .utf8)
     var ourStirs = 0
     let ourTab = watched(url, sameLengthA) { ourStirs += 1 }
+    ourTab.base.rebase(to: Coordinated.Base.fingerprint(Data(sameLengthA.utf8)))
     var landed = 0
     for i in 1...(Int(args[3]) ?? 5) {
         let text = "our own save number \\(i)\\n"
         let sem = DispatchSemaphore(value: 0)
-        Disk.writeToDisk(text, to: url, encoding: .utf8, intent: .update, presenter: nil) { outcome, at in
+        Disk.writeToDisk(text, to: url, encoding: .utf8, intent: .update,
+                         expecting: ourTab.base.ticket(), presenter: nil) { outcome, at in
             if case .wrote = outcome { landed += 1 }
             // stampFile's half: what the app records about its own write.
             ourTab.mark = fileMark(at)
@@ -936,6 +986,132 @@ case "watchcost":
     for t in costTabs { t.watch?.stop() }
     turn(0.6)
     print("\\(armed - idle)\\t\\(whileIdle)\\t\\(forOne)\\t\\(stirredTabs)\\t\\(descriptors() - idle)")
+
+// ------------------------------------------------------------- the base
+//
+// A save must not replace a file whose contents changed since the version the
+// document's text was made from. Found in the running app: an outside write
+// landed while the writer had typing unsaved, the look that would have asked
+// about it lost the race to the autosave, and the autosave put back text built
+// on the version before — then stamped its own write, so nothing ever asked.
+// These drive the app's own writeToDisk with the app's own DocTab and its base,
+// the way the app issues a save: a ticket taken from the tab, then the write.
+
+// A save whose tab read args[4], of text args[3], into whatever the file says
+// by the time the claim is granted. The test holds the file from another
+// process first, so this is the whole shape of the bug: the other writer
+// finishes, and the save that was waiting behind it gets the file.
+case "basesave":
+    let tab = DocTab(id: 1, url: url)
+    tab.base.rebase(to: Coordinated.Base.fingerprint(Data(args[4].utf8)))
+    print(save(args[3], tab.base.ticket()) + "\\t" + onDisk())
+
+// A same-length rewrite through the inode with its timestamp put back: the
+// one change a FileMark cannot see, and so the one a check on the mark would
+// save straight over.
+case "baseblind":
+    try? sameLengthA.write(to: url, atomically: true, encoding: .utf8)
+    let tab = DocTab(id: 1, url: url)
+    tab.base.rebase(to: fingerprintOf(url))
+    let markBefore = fileMark(url)
+    let honest = rewriteKeepingTime(url, sameLengthB)
+    // Measured before the save, so that what it says is about the rewrite.
+    let markBlind = fileMark(url) == markBefore
+    let said = save(sameLengthA + "typed\\n", tab.base.ticket())
+    print("\\(honest)\\t\\(markBlind)\\t\\(first(said))\\t\\(onDisk() == sameLengthB)")
+
+// Two saves of one document out at once — ⌘S or a flush while the autosave is
+// still waiting — both tickets taken before either lands. The second must find
+// the first's bytes expected, not take them for a stranger's.
+case "baseoverlap":
+    try? "before\\n".write(to: url, atomically: true, encoding: .utf8)
+    let tab = DocTab(id: 1, url: url)
+    tab.base.rebase(to: fingerprintOf(url))
+    let t1 = tab.base.ticket(), t2 = tab.base.ticket()
+    var a = "", b = ""
+    let s1 = DispatchSemaphore(value: 0), s2 = DispatchSemaphore(value: 0)
+    Disk.writeToDisk("first\\n", to: url, encoding: .utf8, intent: .update,
+                     expecting: t1, presenter: nil) { o, l in a = describe(o, l); s1.signal() }
+    Disk.writeToDisk("second\\n", to: url, encoding: .utf8, intent: .update,
+                     expecting: t2, presenter: nil) { o, l in b = describe(o, l); s2.signal() }
+    pump(s1); pump(s2)
+    // And a third, a tick later, on a fresh ticket: our own saves chain.
+    let c = save("third\\n", tab.base.ticket())
+    print("\\(first(a))\\t\\(first(b))\\t\\(first(c))\\t\\(onDisk() == "third\\n")")
+
+// Somebody else wrote exactly what this save is about to. Not a conflict:
+// nothing is lost either way, so nothing is asked, nothing is rewritten, and
+// that is simply the version now — the next save of ours lands on it.
+case "basesame":
+    try? "before\\n".write(to: url, atomically: true, encoding: .utf8)
+    let tab = DocTab(id: 1, url: url)
+    tab.base.rebase(to: fingerprintOf(url))
+    try? "agreed\\n".write(to: url, atomically: true, encoding: .utf8)
+    var st1 = stat(); stat(url.path, &st1)
+    let said = save("agreed\\n", tab.base.ticket())
+    var st2 = stat(); stat(url.path, &st2)
+    let untouched = st1.st_ino == st2.st_ino
+        && st1.st_mtimespec.tv_sec == st2.st_mtimespec.tv_sec
+        && st1.st_mtimespec.tv_nsec == st2.st_mtimespec.tv_nsec
+    let next = save("agreed, and more\\n", tab.base.ticket())
+    print("\\(first(said))\\t\\(untouched)\\t\\(first(next))\\t\\(onDisk() == "agreed, and more\\n")")
+
+// A save that took its text before the text on screen was replaced — a
+// Reload, a reload of a clean tab — reaching the file afterwards. The disk
+// matches what the tab now expects, and that is exactly why it would get
+// through: it must be refused because of what it carries, not what it finds.
+case "basesuperseded":
+    try? "before\\n".write(to: url, atomically: true, encoding: .utf8)
+    let tab = DocTab(id: 1, url: url)
+    tab.base.rebase(to: fingerprintOf(url))
+    let stale = tab.base.ticket()
+    try? "reloaded\\n".write(to: url, atomically: true, encoding: .utf8)
+    tab.base.rebase(to: fingerprintOf(url))           // what a reload records
+    let late = save("the text the writer let go of\\n", stale)
+    let fresh = save("reloaded, then typed\\n", tab.base.ticket())
+    print("\\(first(late))\\t\\(first(fresh))\\t\\(onDisk() == "reloaded, then typed\\n")")
+
+// An iA Writer document: the file is the text and its authorship block, the
+// page only ever sees the text, and every write puts the block back. The base
+// is the bytes on disk — block and all — or every save of one of these would
+// look like somebody else's write.
+case "baseia":
+    let file = "One. A1. Two. B1. A2. Three.\\n\\n---\\nAnnotations: 0,29 SHA-256 275985ec6b9c3879871e  \\n@Ann: 5,8 17,3  \\n&Bot: 13,4  \\n...\\n"
+    try? file.write(to: url, atomically: true, encoding: .utf8)
+    let tab = DocTab(id: 1, url: url)
+    tab.base.rebase(to: fingerprintOf(url))
+    tab.authorship = Authorship.split(file)
+    var said: [String] = []
+    for text in ["Zero. One. A1. Two. B1. A2. Three.\\n", "Zero. One. A1. Two. B1. A2. Three. Four.\\n"] {
+        let carried = tab.authorship!.carried(to: text)
+        said.append(first(save(carried.file, tab.base.ticket())))
+        tab.authorship = carried.next
+    }
+    let kept = Authorship.split(onDisk())
+    print("\\(said.joined(separator: ","))\\t\\(kept?.block != nil)\\t\\(kept?.body.hasSuffix("Four.\\n") == true)")
+
+// The file rewritten into another encoding: the same words in different bytes.
+// The save refuses — it cannot tell that from a stranger's write, and should
+// not guess — and the look that follows, finding the same text, agrees the new
+// bytes, after which the save lands. Unless one of our own saves landed while
+// that look was out, whose news is newer than the look's.
+case "baseagree":
+    try? Data([0x63, 0x61, 0x66, 0xE9, 0x0A]).write(to: url)          // café, Latin-1
+    let tab = DocTab(id: 1, url: url)
+    tab.base.rebase(to: fingerprintOf(url))
+    try? "café\\n".write(to: url, atomically: true, encoding: .utf8)  // café, UTF-8
+    let refused = save("café au lait\\n", tab.base.ticket())
+    let moved = tab.base.moved                                         // the look goes out
+    tab.base.agree(with: fingerprintOf(url), unlessMovedSince: moved)  // same text: agreed
+    let then = save("café au lait\\n", tab.base.ticket())
+    // And the other order: a look goes out, our save lands, the look comes
+    // back with what it read before the save. It must not undo the save.
+    let lookOut = tab.base.moved
+    let stale = fingerprintOf(url)
+    let ours = save("café au lait, encore\\n", tab.base.ticket())
+    tab.base.agree(with: stale, unlessMovedSince: lookOut)
+    let after = save("café au lait, encore, again\\n", tab.base.ticket())
+    print("\\(first(refused))\\t\\(first(then))\\t\\(first(ours))\\t\\(first(after))")
 
 default:
     print("?")
@@ -1585,6 +1761,112 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   ok('and stopping them all gives every descriptor back',
      Number(wc[4]) <= 0, `${wc[4]} descriptors left over`);
 
+  console.log('\na save over a file that changed since the document last saw it');
+
+  /* The bug, found in the running app. Another process wrote the file while
+     the writer had typing unsaved. The look that would have asked about it was
+     waiting for that process to let go, came back to a tab that had been typed
+     in, and rightly left the question for the next look — and the autosave
+     got there first, replaced the other process's write with text built on
+     the version before, and stamped its own write, so the next look found
+     nothing to ask about. No question, and somebody's work gone.
+
+     The invariant: a save does not replace a file whose bytes are not the
+     version its text was made from, and it asks that inside its own claim, so
+     that no coordinating writer can land between the look and the replace.
+     Here a real second process holds the file and writes it while the save
+     waits, which is the whole shape of it. */
+  const changedUnder = path.join(dir, 'changed-under.md');
+  fs.writeFileSync(changedUnder, 'before');
+  holder = await hold(changedUnder, 0.8);
+  const cu = run('basesave', changedUnder, 'typed over the old version', 'before').split('\t');
+  const cuHolder = await holder.found;
+  ok('a save made from a version that has since been replaced is refused',
+     cu[0] === 'conflict', cu.join(' '));
+  ok('and the write it waited behind is still what the file says',
+     fs.readFileSync(changedUnder, 'utf8') === 'held',
+     JSON.stringify(fs.readFileSync(changedUnder, 'utf8')));
+  ok('and the other writer found its own bytes when it let go, so nothing went in under it',
+     cuHolder === 'held', `holder found ${JSON.stringify(cuHolder)}`);
+  ok('and the refusal says nothing was saved over, in words a person can read',
+     /has not been saved over/.test(cu[1] || '') && !/error/i.test(cu[1] || ''), cu.join(' '));
+  holder.kill();
+  await wait(50);
+
+  /* The control that keeps the refusal honest: the same contention, a save
+     whose document has already seen the other writer's version. It waits its
+     turn and lands, exactly as a contended save always has. */
+  const sawIt = path.join(dir, 'saw-it.md');
+  fs.writeFileSync(sawIt, 'before');
+  holder = await hold(sawIt, 0.8);
+  const si = run('basesave', sawIt, 'typed over the version it saw', 'held').split('\t');
+  ok('a contended save made from the version that is there still lands, after the holder',
+     si[0] === 'wrote' && fs.readFileSync(sawIt, 'utf8') === 'typed over the version it saw',
+     si.join(' '));
+  ok('and the holder still kept its own bytes while it held the file',
+     (await holder.found) === 'held');
+  holder.kill();
+  await wait(50);
+
+  /* Why the comparison is of bytes and not of the mark: a same-length rewrite
+     with the timestamp put back leaves the date and the size exactly as they
+     were, and a check on those would save straight over it. */
+  const bl = run('baseblind', path.join(dir, 'base-blind.md')).split('\t');
+  ok('the restore really kept the mark, so this is the change a mark cannot see',
+     bl[0] === 'true' && bl[1] === 'true', bl.join(' '));
+  ok('and the save still sees it, and refuses', bl[2] === 'conflict', bl.join(' '));
+  ok('and the rewrite is what the file still says', bl[3] === 'true', bl.join(' '));
+
+  /* And the benign cases, which must not be asked about. Our own saves chain,
+     including two out at once — ⌘S or a presenter's flush while the autosave
+     is still waiting its turn, both tickets taken before either lands. */
+  const ov = run('baseoverlap', path.join(dir, 'base-overlap.md')).split('\t');
+  ok('two saves of one document out at once both land — the second is not taken for a stranger',
+     ov[0] === 'wrote' && ov[1] === 'wrote', ov.join(' '));
+  ok('and the next one after them lands too, and is what the file says',
+     ov[2] === 'wrote' && ov[3] === 'true', ov.join(' '));
+
+  /* Somebody else wrote exactly what this save was about to. Nothing is lost
+     either way, so nothing is asked and nothing is rewritten. */
+  const sm = run('basesame', path.join(dir, 'base-same.md')).split('\t');
+  ok('an outside write of exactly what this save would write is not a conflict',
+     sm[0] === 'wrote', sm.join(' '));
+  ok('and the file is not rewritten for it — same inode, same date', sm[1] === 'true', sm.join(' '));
+  ok('and it is the version from then on, so the next save lands on it',
+     sm[2] === 'wrote' && sm[3] === 'true', sm.join(' '));
+
+  /* A save that took its text before the text on screen was replaced — the
+     writer chose Reload, or a clean tab reloaded — reaching the file after.
+     The disk matches what the tab now expects, which is exactly how it would
+     get through: it is refused for what it carries. */
+  const sp = run('basesuperseded', path.join(dir, 'base-superseded.md')).split('\t');
+  ok('a save carrying text from before a reload is refused when it reaches the file',
+     sp[0] === 'superseded', sp.join(' '));
+  ok('while a save of what is on screen now lands', sp[1] === 'wrote' && sp[2] === 'true',
+     sp.join(' '));
+
+  /* iA Writer keeps authorship at the end of the file and minimark keeps it
+     out of the page. The base is the bytes on disk, block and all, or every
+     save of one of these would look like somebody else's write. */
+  const ia = run('baseia', path.join(dir, 'base-ia.md')).split('\t');
+  ok('an iA Writer document saved twice is not mistaken for a conflict', ia[0] === 'wrote,wrote',
+     ia.join(' '));
+  ok('and its authorship block is on disk after both, kept up to date',
+     ia[1] === 'true' && ia[2] === 'true', ia.join(' '));
+
+  /* The same words in different bytes — the file rewritten into UTF-8. The
+     save cannot tell that from a stranger's write and does not guess. The look
+     that follows finds the same text and agrees the new bytes, after which the
+     save lands; a look that went out before one of our saves landed does not
+     undo it on the way back. */
+  const ag = run('baseagree', path.join(dir, 'base-agree.md')).split('\t');
+  ok('a file rewritten into another encoding is not saved over unseen', ag[0] === 'conflict',
+     ag.join(' '));
+  ok('and once a look has found it says the same thing, the save lands', ag[1] === 'wrote',
+     ag.join(' '));
+  ok('and a look older than one of our saves does not take the base back past it',
+     ag[2] === 'wrote' && ag[3] === 'wrote', ag.join(' '));
+
   console.log('\nand the wiring, which nothing above can run');
 
   /* Everything before this drives the real DocWatch on a real DocTab, but it
@@ -1630,6 +1912,50 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   ok('and a save records what it wrote, so the next look has something to compare with',
      /tab\.digest = DocTab\.digest/.test(inside('    func stampFile')),
      'stampFile no longer records the digest');
+
+  /* The base is checked inside the write, and that much is driven above. What
+     makes the check mean anything lives in AppDelegate. A ticket taken after
+     the text arrives pairs a new lineage with old words and lets a discarded
+     text back over the version the writer chose. A stamp on a refused save is
+     the original bug by another road: the next look is told the file says
+     what the save wrote, and nothing asks. A question answered without moving
+     the base leaves every save after it refused — or moved before it is
+     answered, lets one through while the sheet is still up. Each was tried by
+     hand against everything above, and nothing above noticed. */
+  ok('writeToDisk asks the base inside the claim, after staging and just before the swap',
+     /Coordinated\.write\([\s\S]*replaceContents\([\s\S]*\.verdict\(/.test(inside('    static func writeToDisk')) &&
+     /data\.write\(to: staged\)[\s\S]*lastLook\(\)[\s\S]*replaceItemAt/
+       .test(inside('    private static func replaceContents')),
+     'the check is not inside the claim, or not before the swap');
+  const refusedBranch = (() => {
+    const body = inside('    private func applyWrite');
+    const at = body.indexOf('case .conflict');
+    return at < 0 ? '' : body.slice(at, body.indexOf('case .superseded', at));
+  })();
+  ok('a refused save is not stamped, and goes to the question instead',
+     refusedBranch.length > 0 && !/stampFile/.test(refusedBranch)
+       && /refusedOverChange\(/.test(refusedBranch),
+     refusedBranch || 'applyWrite has no conflict branch');
+  const saves = ['    func runAutosave', '    func saveDocument', '    func saveAs',
+                 '    func flushForCoordination', '    func confirmClose',
+                 '    private func finishTerminate'];
+  const lateTicket = saves.filter((name) =>
+    !(/base\.ticket\(\)[\s\S]*fetchText\(/.test(inside(name)) && /expecting: ticket/.test(inside(name))));
+  ok('every save takes its ticket before asking the page for its text — the autosave, ⌘S, ' +
+     'Save As, a flush, a close and a quit',
+     lateTicket.length === 0, `no ticket before the text in: ${lateTicket.join(', ')}`);
+  ok('the autosave insures a refused document instead of aiming at its file again',
+     /tab\.dirty && \(!tab\.hasFile \|\| tab\.conflicted\)/.test(inside('    func runAutosave')) &&
+     /tab\.hasFile && !tab\.conflicted/.test(inside('    func runAutosave')),
+     'runAutosave still writes a conflicted document, or no longer insures it');
+  const asked = inside('    func checkFileOnDisk');
+  ok('both answers to the changed-on-disk question move the base, and only once given',
+     /beginSheetModal[\s\S]*base\.rebase\(to: read\)/.test(asked)
+       && (asked.match(/base\.rebase\(to: read\)/g) || []).length === 2,
+     'the question does not rebase in its answer, or rebases before it');
+  ok('and a look that finds the same words in new bytes agrees them, or every save would refuse',
+     /guard\s+tab\.digest\s*!=[\s\S]*base\.agree\(/.test(inside('    private func reread')),
+     'reread no longer agrees the base on an unchanged text');
 
   /* And what a storm of them costs. Something rewriting a whole worktree fires
      one event per open document — measured, 200 documents, 200 wakeups, no

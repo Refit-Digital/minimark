@@ -80,17 +80,24 @@ ${unstatic('static func writeToDisk')}
    Asynchronous now, because coordination is: the app never blocks a thread
    waiting for a file somebody else is holding, so neither does this. Main
    keeps turning until the answer lands, exactly as the app's does. */
-func writeBack(_ text: String, to url: URL, want: String.Encoding) -> String {
+func writeBack(_ text: String, to url: URL, read f: TextFile) -> String {
     var answer = "?"
     let sem = DispatchSemaphore(value: 0)
     // .update, because every write this test makes is a save of a file it has
     // just read. What that intent means, and why the disk cannot answer it, is
-    // coordination-test's business rather than this one's.
-    writeToDisk(text, to: url, encoding: want, intent: .update, presenter: nil) { outcome, _ in
+    // coordination-test's business rather than this one's — and so is the
+    // base the save expects to find, which is the bytes this read decoded,
+    // exactly as the app records it on opening a document.
+    let base = Coordinated.Base()
+    base.rebase(to: f.fingerprint)
+    writeToDisk(text, to: url, encoding: f.encoding, intent: .update,
+                expecting: base.ticket(), presenter: nil) { outcome, _ in
         switch outcome {
         case .wrote(let promoted): answer = promoted ? "promoted" : "kept"
         case .failed(let why):     answer = "failed\\t\\(why)"
         case .vanished(let why):   answer = "vanished\\t\\(why)"
+        case .conflict(let why):   answer = "conflict\\t\\(why)"
+        case .superseded:          answer = "superseded"
         }
         sem.signal()
     }
@@ -112,7 +119,7 @@ case "read":
 case "roundtrip":
     guard let f = decodeTextFile(url) else { print("refused"); exit(0) }
     let edited = args.count > 3 ? f.text + args[3] : f.text
-    let how = writeBack(edited, to: url, want: f.encoding)
+    let how = writeBack(edited, to: url, read: f)
     print("\\(how)\\t\\(f.label)")
 default:
     print("?")
