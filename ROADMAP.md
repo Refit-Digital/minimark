@@ -1,6 +1,6 @@
 # Roadmap — what stands between minimark and "finished"
 
-Rewritten 23 September 2026, against `main` at `d24d829`. Ordered by what it costs a person, not by
+Rewritten 23 September 2026, against `main`, and kept current as things close. Ordered by what it costs a person, not by
 what it costs to fix. Everything here was checked against the source or the running app today; where
 something is unverified it says so, because a guess in this list is worse than an omission — somebody
 will act on it.
@@ -42,23 +42,9 @@ So nothing is untrue, and this is a choice about reach rather than a defect:
 - **Notarize.** A Developer ID certificate and a notarising step in `build.sh`, and then a download
   works for strangers. Costs the Apple Developer Program yearly.
 
-Only the second one makes item 5 below matter.
+Only the second one makes item 4 below matter.
 
-### 2. ⌃Tab may not switch tabs — unresolved, one keypress settles it
-
-The Window menu advertises **Show Next Tab ⌃Tab** and **Show Previous Tab ⌃⇧Tab**
-(`minimark.swift:6776`). Choosing the menu item works. A synthetic ⌃Tab sent to the window did not
-switch tabs, twice — but synthetic input does not necessarily travel the real key-equivalent path, so
-that is a hint and not a finding.
-
-I tried to settle it headlessly by asking a `WKWebView` whether it claims the key equivalent. **That
-probe was invalid** and is not worth repeating: it reported ⌘S as claimed too, and ⌘S plainly works.
-Calling `performKeyEquivalent` directly on the view bypasses AppKit's routing.
-
-If a real ⌃Tab does nothing, the fix is an override in `EditorWebView` letting those two through to
-the menu, and `⇧⌘]` / `⇧⌘[` already work regardless. If it works, delete this entry.
-
-### 3. The flush that can land after the other process has read
+### 2. The flush that can land after the other process has read
 
 `savePresentedItemChanges` is how another process asks us to put unsaved text on disk before it
 reads. It hops to main and asks the web layer for the text, which is asynchronous; a timer answers
@@ -70,7 +56,7 @@ Nothing has gone wrong in practice and no reproduction exists. It is listed beca
 piece of the coordination work that was reasoned about and never measured. A probe would register a
 presenter, hold a coordinated read, and check what the reader saw against what landed.
 
-### 4. Writers that do not coordinate still have a window
+### 3. Writers that do not coordinate still have a window
 
 A save checks that the file still matches the version the document descends from, and does it while
 holding the claim, so it is atomic against everything that coordinates. `git`, `vim`, `sed` and `cp`
@@ -78,7 +64,7 @@ do not coordinate, so between that check and the swap there is a window no lock 
 narrow and it is inherent; the kernel watch and the content digest mean the app notices afterwards
 rather than never. Worth knowing, not worth chasing.
 
-### 5. No way to find out there is a new version
+### 4. No way to find out there is a new version
 
 The Help menu has two items: Markdown Reference and Acknowledgements. There is no Check for Updates,
 which is the right call while the only distribution is `git pull && ./build.sh`. It becomes a real
@@ -129,6 +115,11 @@ longer destroys extended attributes or the creation date. A document that is del
 trashed or restored from an archive is noticed and handled. And a save that would replace somebody
 else's work is refused and put to the writer, with both versions kept whichever way they answer —
 which is more than the app it was measured against does.
+
+A shortcut the menu advertised was worse than missing: ⌃Tab reached the page instead of the Window
+menu, so it indented the line and marked the document unsaved rather than switching tabs. A view
+gets first refusal on a key equivalent and WKWebView takes Tab; `EditorWebView.performKeyEquivalent`
+now hands those two back to the menu, and plain Tab still indents.
 
 From the old Tier 2 and Tier 3: the welcome text points at the controls that exist, `⌘,` is
 "Appearance…", markdown is `Owner` for its document type, the heading outline has a resting state,

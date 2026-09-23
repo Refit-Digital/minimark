@@ -1599,6 +1599,25 @@ final class EditorWebView: WKWebView {
         "WKMenuItemIdentifierShowHideMediaControls"
     ]
 
+    /// ⌃Tab and ⌃⇧Tab belong to the Window menu, and without this they never
+    /// reach it. A view gets first refusal on a key equivalent, before the menu
+    /// does, and WKWebView takes Tab — so the key went to the page, where the
+    /// editor's own Tab handling indented the line. The menu said ⌃Tab switched
+    /// tabs and pressing it typed into the document instead, which is worse
+    /// than a shortcut that does nothing: it edits the writing and marks it
+    /// unsaved.
+    ///
+    /// Only these two are taken back, and only with control held, so Tab on its
+    /// own still indents and everything else the web view claims is left alone.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if mods.contains(.control), !mods.contains(.command), !mods.contains(.option),
+           event.charactersIgnoringModifiers == "\t" || event.keyCode == 48 {
+            return NSApp.mainMenu?.performKeyEquivalent(with: event) ?? false
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
     override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
         super.willOpenMenu(menu, with: event)
 
