@@ -1,0 +1,134 @@
+# Roadmap — what stands between minimark and "finished"
+
+Rewritten 23 September 2026, against `main` at `d24d829`. Ordered by what it costs a person, not by
+what it costs to fix. Everything here was checked against the source or the running app today; where
+something is unverified it says so, because a guess in this list is worse than an omission — somebody
+will act on it.
+
+Ground truth first, because it changes how the list should be read. `./build.sh` produces a clean
+universal binary and `codesign --verify` passes. Every suite in `tools/` is green — fourteen files,
+163 coordination assertions among them. Nothing below is breakage. It is the gap between an app that
+works and an app that nobody has to be forgiving about.
+
+The September audit this replaces is archived in `roadmap.rtfd`, with the screenshots that went with
+it. Almost every item in it is now closed — see *What has landed* at the end.
+
+---
+
+## Tier 1 — costs someone their work, or their trust
+
+### 1. Nobody else can run the app you ship
+
+`build/minimark.app` is ad-hoc signed: `Signature=adhoc`, `TeamIdentifier=not set`, and
+`spctl --assess --type execute` returns **rejected**. A copy downloaded from anywhere is refused by
+Gatekeeper with a message about the app being damaged. There are no GitHub releases, so today the only
+way in is to build from source — which works, and needs nothing but the Xcode command line tools.
+
+The README does not say that. Line 27 calls `build/minimark.app` "a self-contained copy, ready to zip
+and ship", which is true for you and false for everybody else.
+
+Two honest ways out, and they are a decision rather than a task:
+
+- **Notarize.** A Developer ID certificate and a notarization step in `build.sh`. Costs the Apple
+  Developer Program, and then a download works for strangers.
+- **Don't, and say so.** Correct the README, and point people at `./build.sh`. Costs nothing, and the
+  repo stops promising something it cannot do.
+
+Until one of them happens, the README is the problem, not the signing.
+
+---
+
+## Tier 2 — friction a writer meets, or a claim the app cannot keep
+
+### 2. ⌃Tab may not switch tabs — unresolved, one keypress settles it
+
+The Window menu advertises **Show Next Tab ⌃Tab** and **Show Previous Tab ⌃⇧Tab**
+(`minimark.swift:6776`). Choosing the menu item works. A synthetic ⌃Tab sent to the window did not
+switch tabs, twice — but synthetic input does not necessarily travel the real key-equivalent path, so
+that is a hint and not a finding.
+
+I tried to settle it headlessly by asking a `WKWebView` whether it claims the key equivalent. **That
+probe was invalid** and is not worth repeating: it reported ⌘S as claimed too, and ⌘S plainly works.
+Calling `performKeyEquivalent` directly on the view bypasses AppKit's routing.
+
+If a real ⌃Tab does nothing, the fix is an override in `EditorWebView` letting those two through to
+the menu, and `⇧⌘]` / `⇧⌘[` already work regardless. If it works, delete this entry.
+
+### 3. The flush that can land after the other process has read
+
+`savePresentedItemChanges` is how another process asks us to put unsaved text on disk before it
+reads. It hops to main and asks the web layer for the text, which is asynchronous; a timer answers
+the other process at `kCoordinationTimeout` so it can never be held up forever. The write can
+therefore still be in flight when that process proceeds — it reads the old bytes, and our text lands
+a moment later.
+
+Nothing has gone wrong in practice and no reproduction exists. It is listed because it is the one
+piece of the coordination work that was reasoned about and never measured. A probe would register a
+presenter, hold a coordinated read, and check what the reader saw against what landed.
+
+### 4. Writers that do not coordinate still have a window
+
+A save checks that the file still matches the version the document descends from, and does it while
+holding the claim, so it is atomic against everything that coordinates. `git`, `vim`, `sed` and `cp`
+do not coordinate, so between that check and the swap there is a window no lock can close. It is
+narrow and it is inherent; the kernel watch and the content digest mean the app notices afterwards
+rather than never. Worth knowing, not worth chasing.
+
+### 5. No way to find out there is a new version
+
+The Help menu has two items: Markdown Reference and Acknowledgements. There is no Check for Updates,
+which is the right call while the only distribution is `git pull && ./build.sh`. It becomes a real
+gap the day item 1 is answered with "notarize".
+
+---
+
+## Tier 3 — features that are absent rather than broken
+
+Verified absent, not merely unfinished: **multiple windows** (no `NSWindowController`; one window,
+tabs inside it), **Mermaid diagrams**, and **table row and column editing** — tables render, but there
+is no way to add or remove a row from the editor.
+
+These are additions. They belong on a different axis from everything above, and none of them is what
+stands between the app and being unembarrassing.
+
+---
+
+## How this list is meant to be kept
+
+The method matters more than any single entry. A claim here earns its place by being reproduced, not
+by being plausible — three separate times during the coordination work a premise that "everybody
+knew" turned out to be false when somebody measured it, and twice the measurement overturned the
+person who wrote the briefing.
+
+- **A suspicion with no reproduction is a guess.** Write it as a suspicion or leave it out.
+- **Check the instrument before trusting a zero.** A test that measures nothing reports success.
+  Every probe in `tools/` that claims an absence also demonstrates it can detect a presence.
+- **A failed grep is not evidence of absence.** Several entries in the old audit were "still open"
+  only because the thing had been renamed.
+- **Test against the real code, never a copy.** `tools/coordination-test.js` extracts the app's own
+  functions out of `minimark.swift` by balancing braces, so it cannot pass against a stale copy.
+
+---
+
+## What has landed since the September audit
+
+Its Tier 1 is closed. Untitled documents are written to a crash-insurance folder and offered back at
+launch; autosave failures are counted and said once in the status bar; a rename can no longer hide a
+file behind a leading dot; and file coordination went from absent to hardened.
+
+That last one ran as seven rounds of build-and-criticise, each judged against iA Writer 8.0.6 on one
+document in a folder other processes were writing, and each verified in the running app rather than
+only in a harness. A contended save used to freeze the app for 2,098 ms and then destroy the other
+writer's bytes; it now holds nobody up and lands after the other writer lets go. A read during
+somebody else's rewrite used to return 60% of a document; it returns all of it or nothing. A save no
+longer destroys extended attributes or the creation date. A document that is deleted, renamed,
+trashed or restored from an archive is noticed and handled. And a save that would replace somebody
+else's work is refused and put to the writer, with both versions kept whichever way they answer —
+which is more than the app it was measured against does.
+
+From the old Tier 2 and Tier 3: the welcome text points at the controls that exist, `⌘,` is
+"Appearance…", markdown is `Owner` for its document type, the heading outline has a resting state,
+images arrive with an alt-text placeholder, a wikilink to a file that does not exist is drawn
+differently, the history store loads off the main thread, sudden termination is declared, the About
+panel has a real copyright line, and right-click gives a curated menu with WebKit's own items and the
+Services submenu removed — with the developer-tools flags behind `#if DEBUG`.
