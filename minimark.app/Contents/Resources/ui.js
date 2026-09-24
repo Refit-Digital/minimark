@@ -945,6 +945,9 @@
       { title: 'Table row above', hint: 'add an empty row over the one you are in', run: function () { MM.tableRow('above'); } },
       { title: 'Table row below', hint: 'add an empty row under the one you are in', run: function () { MM.tableRow('below'); } },
       { title: 'Delete table row', hint: 'take out the table row you are in', run: function () { MM.tableRow('delete'); } },
+      { title: 'Table column left', hint: 'add an empty table column left of the one you are in', run: function () { MM.tableColumn('left'); } },
+      { title: 'Table column right', hint: 'add an empty table column right of the one you are in', run: function () { MM.tableColumn('right'); } },
+      { title: 'Delete table column', hint: 'take out the table column you are in', run: function () { MM.tableColumn('delete'); } },
       { title: 'Insert code block', run: function () { insertSnippet('```\n\n```'); } },
       { title: 'Insert horizontal rule', run: function () { insertSnippet('---'); } },
       { title: 'Insert today’s date', run: function () { insertSnippet(new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })); } },
@@ -2532,6 +2535,9 @@
         tableRowAbove:  function () { MM.tableRow('above'); },
         tableRowBelow:  function () { MM.tableRow('below'); },
         tableRowDelete: function () { MM.tableRow('delete'); },
+        tableColumnLeft:   function () { MM.tableColumn('left'); },
+        tableColumnRight:  function () { MM.tableColumn('right'); },
+        tableColumnDelete: function () { MM.tableColumn('delete'); },
         copyRich: MM.copyRich,
         /* Tabs. Opening and closing belong to the shell — it owns the files
            and the "save this first?" sheet — so those are not here. What is

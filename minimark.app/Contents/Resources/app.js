@@ -3156,6 +3156,23 @@ window.MM = (function () {
     return r.cells.length > 0 && r.cells.every(function (c) { return DELIM_CELL.test(c.trim()); });
   }
 
+  /* Which cell of a row an offset falls in. The pipes are counted the way
+     rowCells cuts them, escapes and all, so `\|` written inside a cell is
+     text and not a boundary and the answer names a cell the row really has.
+     A caret in the indent or on the opening pipe is in the first cell; one
+     sitting past the closing pipe is in the last, which is where a writer
+     who has just finished typing the row is standing. */
+  function cellIndexAt(r, off) {
+    var line = rowText(r), n = 0;
+    off = Math.max(0, Math.min(line.length, off | 0));
+    for (var i = r.indent.length + (r.lead ? 1 : 0); i < off; i++) {
+      var ch = line.charAt(i);
+      if (ch === '\\' && i + 1 < line.length) { i++; continue; }
+      if (ch === '|') n++;
+    }
+    return Math.max(0, Math.min(n, r.cells.length - 1));
+  }
+
   /* The table the caret is in, or null. `text` is one block and `at` an
      offset into it. The run ends at the first line that is not a row, so
      prose written directly under a table is outside it and stays safe. */
@@ -3182,20 +3199,28 @@ window.MM = (function () {
        used here too; a table with no delimiter falls back to its first row,
        and either way one table has one answer. */
     var cols = Math.max(1, rows[delim > 0 ? delim : 0].cells.length);
+    /* The row commands want the row; the column ones want the cell as well.
+       It is read off the caret's own row, so a caret on the delimiter has a
+       column like any other line — which is exactly where someone setting
+       alignment is looking when they reach for these. */
     return { text: text, lines: lines, starts: starts, first: first, last: last,
-             rows: rows, delim: delim, row: ln - first, cols: cols };
+             rows: rows, delim: delim, row: ln - first, cols: cols,
+             col: cellIndexAt(rows[ln - first], at - starts[ln]) };
+  }
+
+  /* One cell with the writing taken out of it and the width left behind, so
+     whatever goes next to it lands in the same place on the line. */
+  function blankCell(s) {
+    return s == null ? ' ' : s.replace(/[\s\S]/g, ' ');
   }
 
   /* A new row spaced like the one it is going next to: each cell is that
-     row's cell with the writing taken out of it, so the pipes land in the
-     same columns. An aligned table stays aligned and a compact one stays
-     compact without either having to be recognised as such. */
+     row's cell blanked, so the pipes land in the same columns. An aligned
+     table stays aligned and a compact one stays compact without either
+     having to be recognised as such. */
   function blankRow(t, tmpl) {
     var cells = [];
-    for (var c = 0; c < t.cols; c++) {
-      var s = tmpl.cells[c];
-      cells.push(s == null ? ' ' : s.replace(/[\s\S]/g, ' '));
-    }
+    for (var c = 0; c < t.cols; c++) cells.push(blankCell(tmpl.cells[c]));
     return { indent: tmpl.indent, lead: tmpl.lead, closed: tmpl.closed,
              tail: tmpl.tail, cells: cells };
   }
@@ -3246,6 +3271,110 @@ window.MM = (function () {
     };
   }
 
+  /* ---------------- table columns ----------------
+
+     The same grid, spliced the other way. A column is worse to edit by hand
+     than a row is: a row is one line to get right, a column is one cell on
+     every line including the dashes, and missing the dashes turns the table
+     back into four lines of pipes. */
+
+  /* The cell of `r` a new neighbour should be shaped after. Normally the
+     cell the caret is in; a ragged row that stops short of it is shaped
+     after the last cell it has, which is the nearest thing it can offer. */
+  function cellTemplate(r, at) {
+    var i = Math.min(at | 0, r.cells.length - 1);
+    return i >= 0 ? r.cells[i] : null;
+  }
+
+  /* The dashes for a new column: as many as its neighbour has, spaced the
+     way the neighbour is spaced, and with no colons. A table whose rules are
+     written `-----` gets another `-----` rather than a stubby `---` that
+     would leave the line ragged. The colons are dropped on purpose — `:--:`
+     says a column is centred, and a column nobody has set yet is not. */
+  function blankDelimCell(s) {
+    if (s == null) return ' --- ';
+    var lead = /^[ \t]*/.exec(s)[0];
+    var rest = s.slice(lead.length);
+    var trail = /[ \t]*$/.exec(rest)[0];
+    var mid = rest.slice(0, rest.length - trail.length);
+    return lead + new Array(Math.max(1, mid.length) + 1).join('-') + trail;
+  }
+
+  /* Where a writer would start typing in one cell of a row: past the padding
+     in front of it. A brand new cell is all padding, so the amount to skip
+     comes from `tmpl`, the cell it was shaped after — the same reasoning
+     firstCellAt uses for a brand new row. */
+  function cellStartAt(r, idx, tmpl) {
+    idx = Math.max(0, Math.min(idx | 0, r.cells.length - 1));
+    var at = r.indent.length + (r.lead ? 1 : 0);
+    for (var i = 0; i < idx; i++) at += r.cells[i].length + 1;
+    var c = r.cells[idx] == null ? '' : r.cells[idx];
+    var pre = /^[ \t]*/.exec(tmpl == null ? c : tmpl)[0].length;
+    return at + Math.min(pre, c.length);
+  }
+
+  /* One column edit, text in and text out. `op` is 'left', 'right' or
+     'delete'. Returns null when there is no table under the caret, or
+     'last' when the ask was to delete the only column there is, which would
+     leave a table with nothing in it to be a table about.
+
+     There is no refusal for the first column the way there is for the header
+     row: the header row is what makes the thing a table, the first column is
+     just a column. */
+  function tableColumnEdit(text, at, op) {
+    var t = tableAt(text, at);
+    if (!t) return null;
+    var rows = t.rows, i, r;
+    /* Columns are counted off the dashes, here as everywhere else in this
+       section, so a cell a long row has beyond the table's width is in no
+       column at all; a caret parked in one works on the last real column. */
+    var col = Math.max(0, Math.min(t.col, t.cols - 1));
+    /* Read before anything is spliced: the caret's landing spot is measured
+       against the cell that was under it when the writer asked. */
+    var tmpl = cellTemplate(rows[t.row], col), k;
+    if (op === 'delete') {
+      if (t.cols < 2) return 'last';
+      for (i = 0; i < rows.length; i++) {
+        r = rows[i];
+        /* A row that never reached this column has nothing here to take.
+           Its cells keep the positions they had, which is what a renderer
+           padding the row out to the delimiter was already showing. */
+        if (r.cells.length <= col) continue;
+        var gone = r.cells.splice(col, 1)[0];
+        /* A short row whose one cell was the one deleted would be left with
+           no cells, and a row of no cells is not a row. It keeps an empty
+           cell the width of the one it lost, so it still reads as a row. */
+        if (!r.cells.length) r.cells.push(blankCell(gone));
+      }
+      /* The column that closed the gap, or the one before it when the
+         deleted column was the last. */
+      k = Math.min(col, t.cols - 2);
+    } else {
+      k = op === 'left' ? col : col + 1;
+      for (i = 0; i < rows.length; i++) {
+        r = rows[i];
+        /* Short of the seam: the new column opens to the right of everything
+           this row has, and a renderer already pads it out with empties, so
+           adding one here would only move its cells about. Leaving it be is
+           what keeps a ragged table exactly as ragged as it was. */
+        if (r.cells.length < k) continue;
+        var s = cellTemplate(r, col);
+        r.cells.splice(k, 0, i === t.delim ? blankDelimCell(s) : blankCell(s));
+      }
+    }
+    /* The delimiter is never skipped and never over-run: `cols` is its own
+       cell count, and `k` and `col` are both bounded by it. That is why the
+       dashes cannot fall out of step with the rest of the table. */
+    var out = rows.map(rowText);
+    var head = t.starts[t.first], tail = t.starts[t.last] + t.lines[t.last].length;
+    var caret = head;
+    for (i = 0; i < t.row; i++) caret += out[i].length + 1;
+    return {
+      text: text.slice(0, head) + out.join('\n') + text.slice(tail),
+      at: caret + cellStartAt(rows[t.row], k, op === 'delete' ? null : tmpl)
+    };
+  }
+
   /* The block the caret is in, as a span of the field that holds it. Split
      view holds the whole document, so the block has to be found — and the
      blocks are re-cut from the field's own value rather than read off
@@ -3289,6 +3418,21 @@ window.MM = (function () {
     /* Nowhere near a table: say where the commands work rather than nothing
        at all, which reads as the command having failed. */
     if (!r) { toast('Put the caret in a table row'); return false; }
+    replaceRange(b.ta, b.from, b.to, r.text, b.from + r.at, b.from + r.at);
+    b.ta.focus();
+    return true;
+  }
+
+  /* The column half, down the same path: same block, same replaceRange, so
+     one ⌘Z puts the table back however many cells the edit touched. The
+     "nowhere near a table" answer is the row one with the noun swapped —
+     these commands work on a column, so that is what it asks for. */
+  function tableColumn(op) {
+    var b = caretBlock();
+    var r = b && tableColumnEdit(b.ta.value.slice(b.from, b.to),
+                                 (b.ta.selectionStart || 0) - b.from, op);
+    if (r === 'last') { toast('That is the only column left'); return false; }
+    if (!r) { toast('Put the caret in a table column'); return false; }
     replaceRange(b.ta, b.from, b.to, r.text, b.from + r.at, b.from + r.at);
     b.ta.focus();
     return true;
@@ -3365,6 +3509,7 @@ window.MM = (function () {
     wrapSelection: wrapSelection, insertLink: insertLink, copyRich: copyRich,
     setHeading: setHeading, toggleLinePrefix: toggleLinePrefix, selectionRect: selectionRect,
     tableRow: tableRow, tableAt: tableAt, tableRowEdit: tableRowEdit,
+    tableColumn: tableColumn, tableColumnEdit: tableColumnEdit,
     insertEmptyBlockAt: insertEmptyBlockAt, textareaForInsert: textareaForInsert,
     pinInsertPoint: pinInsertPoint,
     histSnapshot: histSnapshot, histPeek: histPeek, histRestore: histRestore,
