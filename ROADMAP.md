@@ -52,9 +52,12 @@ the other process at `kCoordinationTimeout` so it can never be held up forever. 
 therefore still be in flight when that process proceeds — it reads the old bytes, and our text lands
 a moment later.
 
-Nothing has gone wrong in practice and no reproduction exists. It is listed because it is the one
-piece of the coordination work that was reasoned about and never measured. A probe would register a
-presenter, hold a coordinated read, and check what the reader saw against what landed.
+Nothing has gone wrong in practice. Tried on 24 September: another process took a coordinated read
+of an open document every 0.2s while text was typed into it, and every read returned the current
+text — it never saw the older version. That is reassuring and it is not proof, because a fast
+autosave and a working flush look identical from outside; the test cannot tell which one answered.
+Settling it needs a document held dirty across a read, which nothing can arrange from outside the
+app. Left open, and small: the autosave lands about a second after a keystroke either way.
 
 ### 3. Writers that do not coordinate still have a window
 
