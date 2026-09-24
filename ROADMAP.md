@@ -78,8 +78,10 @@ gap the day item 1 is answered with "notarize".
 ## Tier 3 — features that are absent rather than broken
 
 Verified absent, not merely unfinished: **multiple windows** (no `NSWindowController`; one window,
-tabs inside it), **Mermaid diagrams**, and **table row and column editing** — tables render, but there
-is no way to add or remove a row from the editor.
+tabs inside it) and **Mermaid diagrams**.
+
+Table row and column editing was here and is now done — rows and columns can be added and removed
+from the caret, in both views, from the Format menu and the palette.
 
 These are additions. They belong on a different axis from everything above, and none of them is what
 stands between the app and being unembarrassing.
