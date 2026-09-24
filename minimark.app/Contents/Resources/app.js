@@ -1308,11 +1308,17 @@ window.MM = (function () {
      commit points one block too far down and must be corrected. */
   var lastDropped = -1;
 
+  /* Where the caret stood when the last block closed. The palette commits
+     the open block before it reads the document, so a command run from it
+     would otherwise have no caret left to work from. */
+  var lastCaret = 0;
+
   function commitEditing(silent) {
     var ed = state.editing;
     if (!ed) { lastDropped = -1; return false; }
     state.editing = null;
     var value = ed.ta.value, i = ed.i;
+    lastCaret = ed.ta.selectionStart || 0;
     var parts = splitBlocks(value);
     var drop = value.trim() === '' && state.blocks.length > 1;
     lastDropped = drop ? i : -1;
@@ -3102,6 +3108,192 @@ window.MM = (function () {
     replaceRange(ta, sp[0], sp[1], out, sp[0], sp[0] + out.length);
   }
 
+  /* ---------------- table rows ----------------
+
+     A table is the one block a writer cannot simply type another line into:
+     the new line has to carry the right number of pipes, sit on the right
+     side of the dashes, and keep whatever spacing the rest of the table
+     uses. Three commands do that bookkeeping instead.
+
+     Everything below takes the text of one block and an offset into it, so
+     both views share one transform: live view hands over the block open in
+     its textarea, split view the slice of the document the caret fell in.
+     Rows are parsed into cells rather than pushed around as strings, so the
+     column versions of these commands are the same parse with a different
+     splice. */
+
+  var TABLE_LINE = /^\s*\|/;
+  var DELIM_CELL = /^:?-+:?$/;
+
+  /* One row cut at the pipes it is actually written with. Both outer pipes
+     are optional in GFM and a pipe inside a cell can be escaped, so neither
+     can be assumed away. Every piece is kept as written, spacing and all,
+     because writing a new row means copying how this one was spaced. */
+  function rowCells(line) {
+    var indent = /^[ \t]*/.exec(line)[0];
+    var body = line.slice(indent.length);
+    var lead = body.charAt(0) === '|';
+    if (lead) body = body.slice(1);
+    var cells = [], cur = '';
+    for (var i = 0; i < body.length; i++) {
+      var ch = body.charAt(i);
+      if (ch === '\\' && i + 1 < body.length) { cur += ch + body.charAt(++i); continue; }
+      if (ch === '|') { cells.push(cur); cur = ''; continue; }
+      cur += ch;
+    }
+    /* Writing after the last pipe is a final cell; whitespace after it is
+       the row being closed off, and belongs to no cell at all. */
+    var closed = cells.length > 0 && cur.trim() === '';
+    if (!closed) cells.push(cur);
+    return { indent: indent, lead: lead, closed: closed, tail: closed ? cur : '', cells: cells };
+  }
+
+  function rowText(r) {
+    return r.indent + (r.lead ? '|' : '') + r.cells.join('|') + (r.closed ? '|' + r.tail : '');
+  }
+
+  function isDelimRow(r) {
+    return r.cells.length > 0 && r.cells.every(function (c) { return DELIM_CELL.test(c.trim()); });
+  }
+
+  /* The table the caret is in, or null. `text` is one block and `at` an
+     offset into it. The run ends at the first line that is not a row, so
+     prose written directly under a table is outside it and stays safe. */
+  function tableAt(text, at) {
+    text = String(text);
+    if (blockKind(text) !== 'table') return null;
+    var lines = text.split('\n'), starts = [], p = 0, i;
+    for (i = 0; i < lines.length; i++) { starts.push(p); p += lines[i].length + 1; }
+    at = Math.max(0, Math.min(text.length, at | 0));
+    var ln = 0;
+    for (i = 0; i < lines.length; i++) if (at >= starts[i]) ln = i;
+    if (!TABLE_LINE.test(lines[ln])) return null;
+    var first = ln, last = ln;
+    while (first > 0 && TABLE_LINE.test(lines[first - 1])) first--;
+    while (last < lines.length - 1 && TABLE_LINE.test(lines[last + 1])) last++;
+    var rows = lines.slice(first, last + 1).map(rowCells);
+    /* GFM puts the delimiter on the second line and nowhere else, so a row
+       of dashes further down is a row whose cells happen to hold dashes and
+       is the writer's to delete. The first line is tested as well, so a
+       table that has already lost its header cannot lose its dashes too. */
+    var delim = rows.length > 1 && isDelimRow(rows[1]) ? 1 : (isDelimRow(rows[0]) ? 0 : -1);
+    /* Ragged tables are ordinary in the wild, and a renderer pads the short
+       rows and drops the long ones against the delimiter. That is the count
+       used here too; a table with no delimiter falls back to its first row,
+       and either way one table has one answer. */
+    var cols = Math.max(1, rows[delim > 0 ? delim : 0].cells.length);
+    return { text: text, lines: lines, starts: starts, first: first, last: last,
+             rows: rows, delim: delim, row: ln - first, cols: cols };
+  }
+
+  /* A new row spaced like the one it is going next to: each cell is that
+     row's cell with the writing taken out of it, so the pipes land in the
+     same columns. An aligned table stays aligned and a compact one stays
+     compact without either having to be recognised as such. */
+  function blankRow(t, tmpl) {
+    var cells = [];
+    for (var c = 0; c < t.cols; c++) {
+      var s = tmpl.cells[c];
+      cells.push(s == null ? ' ' : s.replace(/[\s\S]/g, ' '));
+    }
+    return { indent: tmpl.indent, lead: tmpl.lead, closed: tmpl.closed,
+             tail: tmpl.tail, cells: cells };
+  }
+
+  /* Where a writer would start typing in a row: inside the first cell, past
+     whatever padding the table puts in front of it. */
+  function firstCellAt(row, tmpl) {
+    var c0 = row.cells[0] == null ? '' : row.cells[0];
+    var t0 = tmpl.cells[0] == null ? '' : tmpl.cells[0];
+    var pre = /^[ \t]*/.exec(t0)[0].length;
+    return row.indent.length + (row.lead ? 1 : 0) + Math.min(pre, c0.length);
+  }
+
+  /* One row edit, text in and text out. `op` is 'above', 'below' or
+     'delete'. Returns null when there is no table under the caret, or why
+     the ask was refused: 'header' for the two rows that are the table
+     rather than anything in it, 'last' for the only row there is. */
+  function tableRowEdit(text, at, op) {
+    var t = tableAt(text, at);
+    if (!t) return null;
+    var rows = t.rows, tmpl = rows[t.row], landed, i;
+    if (op === 'delete') {
+      /* The header names the columns and the dashes are what make the thing
+         a table at all. Taking either out is not deleting a row, it is
+         deleting the table, and the writer has the block itself for that. */
+      if (t.row <= t.delim) return 'header';
+      if (rows.length < 2) return 'last';
+      rows.splice(t.row, 1);
+      landed = Math.min(t.row, rows.length - 1);
+      /* The last body row gone leaves the delimiter directly above, which is
+         no place for a caret; the header is the nearest row left. */
+      if (landed === t.delim) landed = Math.max(0, t.delim - 1);
+    } else {
+      landed = op === 'above' ? t.row : t.row + 1;
+      /* Nothing may come between the header and its delimiter, and a row put
+         above the header would quietly become the header. Either way the
+         first place a body row can go is under the dashes. */
+      if (landed <= t.delim) landed = t.delim + 1;
+      rows.splice(landed, 0, blankRow(t, tmpl));
+    }
+    var out = rows.map(rowText);
+    var head = t.starts[t.first], tail = t.starts[t.last] + t.lines[t.last].length;
+    var caret = head;
+    for (i = 0; i < landed; i++) caret += out[i].length + 1;
+    return {
+      text: text.slice(0, head) + out.join('\n') + text.slice(tail),
+      at: caret + firstCellAt(rows[landed], op === 'delete' ? rows[landed] : tmpl)
+    };
+  }
+
+  /* The block the caret is in, as a span of the field that holds it. Split
+     view holds the whole document, so the block has to be found — and the
+     blocks are re-cut from the field's own value rather than read off
+     state.blocks, which split view refreshes on a timer and which can
+     therefore be a keystroke behind what the writer is looking at.
+
+     Live view has one block open and nothing else on the page is editable.
+     Arriving with none open means the command came from the palette, which
+     commits the open block before it reads the document; the block the
+     writer was last in is reopened where they left it rather than the
+     command answering that there is no table anywhere. */
+  function caretBlock() {
+    if (state.mode === 'live' && !state.editing && state.blocks.length) {
+      editBlock(Math.min(Math.max(0, state.lastBlock | 0), state.blocks.length - 1), lastCaret, false);
+    }
+    var ta = activeTextarea();
+    if (!ta) return null;
+    if (ta !== el.src) return { ta: ta, from: 0, to: ta.value.length };
+    var v = ta.value, at = ta.selectionStart || 0;
+    var bs = splitBlocks(v), p = 0, span = [0, 0];
+    for (var i = 0; i < bs.length; i++) {
+      if (bs[i] === '') continue;
+      var k = v.indexOf(bs[i], p);
+      if (k === -1) break;
+      span = [k, k + bs[i].length];
+      if (at <= span[1]) break;
+      p = span[1];
+    }
+    return { ta: ta, from: span[0], to: span[1] };
+  }
+
+  /* Through replaceRange like every other formatting command, so the change
+     is one step on the document's own undo stack and one ⌘Z puts the table
+     back the way it was. */
+  function tableRow(op) {
+    var b = caretBlock();
+    var r = b && tableRowEdit(b.ta.value.slice(b.from, b.to),
+                              (b.ta.selectionStart || 0) - b.from, op);
+    if (r === 'header') { toast('The header row has to stay'); return false; }
+    if (r === 'last') { toast('That is the only row left'); return false; }
+    /* Nowhere near a table: say where the commands work rather than nothing
+       at all, which reads as the command having failed. */
+    if (!r) { toast('Put the caret in a table row'); return false; }
+    replaceRange(b.ta, b.from, b.to, r.text, b.from + r.at, b.from + r.at);
+    b.ta.focus();
+    return true;
+  }
+
   /* ---------------- selection geometry ---------------- */
   var MIRROR_PROPS = ['fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'fontVariant',
     'letterSpacing', 'lineHeight', 'textTransform', 'wordSpacing', 'textIndent',
@@ -3172,6 +3364,7 @@ window.MM = (function () {
     paintBlockSentences: paintBlockSentences, paintLineSentences: paintLineSentences,
     wrapSelection: wrapSelection, insertLink: insertLink, copyRich: copyRich,
     setHeading: setHeading, toggleLinePrefix: toggleLinePrefix, selectionRect: selectionRect,
+    tableRow: tableRow, tableAt: tableAt, tableRowEdit: tableRowEdit,
     insertEmptyBlockAt: insertEmptyBlockAt, textareaForInsert: textareaForInsert,
     pinInsertPoint: pinInsertPoint,
     histSnapshot: histSnapshot, histPeek: histPeek, histRestore: histRestore,

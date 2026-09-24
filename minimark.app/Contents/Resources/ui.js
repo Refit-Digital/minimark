@@ -942,6 +942,9 @@
       { title: 'Page Setup…', key: '⇧⌘P', run: function () { send('menu', { name: 'pageSetup' }); } },
       { title: 'Reveal in Finder', run: function () { send('menu', { name: 'reveal' }); } },
       { title: 'Insert table', run: function () { insertSnippet('| Column | Column |\n| --- | --- |\n|  |  |'); } },
+      { title: 'Table row above', hint: 'add an empty row over the one you are in', run: function () { MM.tableRow('above'); } },
+      { title: 'Table row below', hint: 'add an empty row under the one you are in', run: function () { MM.tableRow('below'); } },
+      { title: 'Delete table row', hint: 'take out the table row you are in', run: function () { MM.tableRow('delete'); } },
       { title: 'Insert code block', run: function () { insertSnippet('```\n\n```'); } },
       { title: 'Insert horizontal rule', run: function () { insertSnippet('---'); } },
       { title: 'Insert today’s date', run: function () { insertSnippet(new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })); } },
@@ -2526,6 +2529,9 @@
         code: function () { MM.wrapSelection('`', '`', 'code'); },
         strike: function () { MM.wrapSelection('~~', '~~', 'text'); },
         link: MM.insertLink,
+        tableRowAbove:  function () { MM.tableRow('above'); },
+        tableRowBelow:  function () { MM.tableRow('below'); },
+        tableRowDelete: function () { MM.tableRow('delete'); },
         copyRich: MM.copyRich,
         /* Tabs. Opening and closing belong to the shell — it owns the files
            and the "save this first?" sheet — so those are not here. What is

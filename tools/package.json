@@ -4,7 +4,7 @@
   "private": true,
   "description": "Test and contract tools for minimark. Run `npm install` here, then `npm test`.",
   "scripts": {
-    "test": "node bridge-contract.js && node tabs-test.js && node live-edit-test.js && node style-check-test.js && node templates-test.js && node wikilink-test.js && node focus-test.js && node sentence-focus-test.js && node reveal-test.js && node encoding-test.js && node unsaved-test.js && node coordination-test.js && node authorship-test.js && node palette-test.js",
+    "test": "node bridge-contract.js && node tabs-test.js && node live-edit-test.js && node style-check-test.js && node templates-test.js && node wikilink-test.js && node focus-test.js && node sentence-focus-test.js && node reveal-test.js && node encoding-test.js && node unsaved-test.js && node coordination-test.js && node authorship-test.js && node palette-test.js && node table-row-test.js",
     "contract": "node bridge-contract.js",
     "tabs": "node tabs-test.js",
     "live": "node live-edit-test.js",
@@ -18,7 +18,8 @@
     "palette": "node palette-test.js",
     "reveal": "node reveal-test.js",
     "focus": "node focus-test.js",
-    "sentence": "node sentence-focus-test.js"
+    "sentence": "node sentence-focus-test.js",
+    "table-rows": "node table-row-test.js"
   },
   "devDependencies": {
     "playwright": "^1.62.1"

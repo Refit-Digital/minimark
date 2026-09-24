@@ -6744,6 +6744,14 @@ extension AppDelegate {
         add(format, "Italic", key: "i", command: "italic")
         add(format, "Inline Code", key: "e", command: "code")
         add(format, "Link", key: "k", mods: [.command, .shift], command: "link")
+        format.addItem(.separator())
+        // Rows, not columns: a row is what a writer adds mid-thought, and it
+        // is the one a table cannot be typed into by hand without counting
+        // pipes. No key equivalents — three more ⌘ bindings for something
+        // reached a few times a document is a worse trade than the menu.
+        add(format, "Table Row Above", command: "tableRowAbove")
+        add(format, "Table Row Below", command: "tableRowBelow")
+        add(format, "Delete Table Row", command: "tableRowDelete")
 
         // ---- View --------------------------------------------------------
         let view = submenu(main, "View")
