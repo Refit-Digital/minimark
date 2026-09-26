@@ -117,6 +117,18 @@ const DOC = [
      ['line 3', 'line 7']);
   eq('two characters are not enough to search the text', (await query('qu')).filter(r => r.key === 'Text'), []);
 
+  // A shortcut the palette advertises has to be the one the menu has. ⌘N used
+  // to make a tab and now makes a window, and a palette still saying ⌘N next to
+  // "New document" would be teaching the wrong key to the person most likely to
+  // learn it here.
+  console.log('\nthe keys it advertises');
+  list = await query('>new ');
+  eq('a window and a tab are two commands, not one',
+     list.filter(r => /^New (window|tab)$/.test(r.title)).map(r => [r.title, r.key]),
+     [['New window', '\u2318N'], ['New tab', '\u2318T']]);
+  eq('and nothing still calls ⌘N a new document',
+     list.filter(r => r.title === 'New document'), []);
+
   console.log('\nsigils');
   list = await query('>zen');
   eq('> is commands only', [list[0].title, list.some(r => r.heading || r.key === 'Text')], ['Toggle Zen mode', false]);

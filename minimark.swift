@@ -54,6 +54,11 @@ let kTrafficInset: CGFloat = kBarPad
 // costs the document almost nothing.
 let kEdgeGrip: CGFloat = 8
 
+// How far a window with nothing remembered about it steps down and across from
+// the last one. Enough that its title bar and its left edge are both plainly
+// its own, which is all this has to be.
+let kWindowStep: CGFloat = 26
+
 // The tab strip lives off the top of the window and comes down when the
 // pointer reaches the edge. Noticing that has to happen here rather than in
 // the page: the top kEdgeGrip pixels belong to a real drag strip that takes
@@ -391,7 +396,187 @@ let kActiveDocKey = "activeDocumentIndex"
 let kOpenTabsKey = "openTabs"
 let kActiveTabKey = "activeTabIndex"
 
+/// Which window was in front, counted over the windows the strip describes. A
+/// key of its own rather than another marker, because it is one number about
+/// the whole session rather than something that belongs to a window; absent
+/// from any session written before there could be two windows, which reads
+/// back as zero, which is the only window there was.
+let kFrontWindowKey = "frontWindowIndex"
+
+/// The base name a window's remembered frame is saved under. The first window
+/// uses it as it stands, so a frame saved by any earlier build is still the
+/// first window's; the second and later ones number off it. See freeFrameName.
 let kFrameName = "minimarkMainWindow"
+
+// ============================================================================
+// The session
+//
+// What was open when the app last went away, so the next launch can put it
+// back. It belongs to neither the app nor a window: it is the strip in
+// UserDefaults, and having it in one place is what lets a window be handed its
+// own share of it without having to know there are others.
+//
+// One strip for the whole app, with a marker wherever the next window begins.
+// The first window needs no marker, so a session with one window in it goes out
+// exactly as it went out before there could be two — and a session written by
+// any earlier build has no markers in it at all, so it reads back as the one
+// window it describes, through the same code, with no special case anywhere.
+// That is the whole of the compatibility story: the new dimension is spelled in
+// entries the old shape had no room for rather than in a changed meaning for
+// anything the old shape already held.
+// ============================================================================
+
+enum Session {
+
+    /// Where the next window's documents begin. A prefix inside the strip
+    /// rather than a parallel array of counts, because a parallel array can
+    /// disagree with the strip — drop one unreadable path and the counts are
+    /// wrong — and a marker travelling with the entries cannot. The number
+    /// after it is that window's own front document, counted inside the window.
+    static let mark = "w:"
+
+    /// One seat in a restored strip: a crash-insurance buffer, whose text is
+    /// already in hand, or a path whose document has still to be read.
+    enum Seat {
+        case buffer(id: String, text: String)
+        case file(URL)
+    }
+
+    /// The session resolved against the disk: the seats each window reopens,
+    /// which of them each window puts in front, and which window comes forward.
+    struct Plan {
+        var windows: [[Seat]] = []
+        var fronts: [Int] = []
+        var frontWindow = 0
+        var isEmpty: Bool { windows.isEmpty }
+    }
+
+    /// Every window's entries, in the order the windows were made, and for each
+    /// of them the seat that was in front of the writer.
+    static func write(_ windows: [[String]], fronts: [Int], frontWindow: Int,
+                      to defaults: UserDefaults = .standard) {
+        var strip: [String] = []
+        for (w, entries) in windows.enumerated() {
+            if w > 0 { strip.append(mark + String(w < fronts.count ? fronts[w] : 0)) }
+            strip.append(contentsOf: entries)
+        }
+        defaults.set(strip, forKey: kOpenTabsKey)
+        // The first window's front seat — which, for a session with one window
+        // in it, is the index into the strip that this key has always been.
+        defaults.set(fronts.first ?? 0, forKey: kActiveTabKey)
+        defaults.set(frontWindow, forKey: kFrontWindowKey)
+    }
+
+    /// The strip back as it went out: one group of entries per window. A
+    /// session with no markers in it — every session written before this, and
+    /// every one written since with one window open — is one group, which is
+    /// what it says. Older sessions still only recorded paths, and those are
+    /// read into the same shape rather than through a second path that would
+    /// then have to be kept in step with this one.
+    static func groups(in defaults: UserDefaults = .standard)
+        -> (windows: [[String]], fronts: [Int], frontWindow: Int) {
+
+        var entries = defaults.stringArray(forKey: kOpenTabsKey) ?? []
+        var first = defaults.integer(forKey: kActiveTabKey)
+        if entries.isEmpty {
+            var paths = defaults.stringArray(forKey: kOpenDocsKey) ?? []
+            if paths.isEmpty, let legacy = defaults.string(forKey: kLastDocKey) { paths = [legacy] }
+            entries = paths.map { "f:" + $0 }
+            first = defaults.integer(forKey: kActiveDocKey)
+        }
+
+        var windows: [[String]] = [[]]
+        var fronts = [first]
+        for entry in entries {
+            guard entry.hasPrefix(mark) else {
+                windows[windows.count - 1].append(entry)
+                continue
+            }
+            windows.append([])
+            fronts.append(Int(entry.dropFirst(mark.count)) ?? 0)
+        }
+        return (windows, fronts, defaults.integer(forKey: kFrontWindowKey))
+    }
+
+    /// …and the same thing settled: the entries that name a readable file or a
+    /// buffer with something still in it, each in the window it was in, in the
+    /// order they were in.
+    ///
+    /// Settled here, once, for the whole app rather than a window at a time,
+    /// because two of the rules it applies are the app's and not a window's.
+    /// The cap is on the launch, not on each window, so a session that has
+    /// somehow grown absurd cannot turn a launch into a minute of file reads by
+    /// spreading itself over windows. And one file is open in one place: a path
+    /// the session mentions twice is seated once, wherever the two mentions
+    /// are, or the launch itself would put one file in two tabs with two undo
+    /// stacks and two autosaves aimed at it.
+    static func plan(in defaults: UserDefaults = .standard, cap: Int) -> Plan {
+        let fm = FileManager.default
+        var (windows, fronts, frontWindow) = groups(in: defaults)
+
+        // Buffers on disk that the session does not mention. That is what a
+        // crash leaves behind — the strip was recorded before the buffer was
+        // written, or the write and the crash crossed — and they are the whole
+        // reason the folder exists, so they are offered back at the end of the
+        // strip rather than dropped. The end of the strip is the end of the
+        // last window, which is where they have always gone.
+        var named = Set<String>()
+        for entries in windows {
+            for entry in entries where entry.hasPrefix("s:") {
+                named.insert(String(entry.dropFirst(2)))
+            }
+        }
+        for id in Scratch.all() where !named.contains(id) {
+            windows[windows.count - 1].append("s:" + id)
+        }
+
+        var seenPaths = Set<String>()
+        var seenIDs = Set<String>()
+        var seated = 0
+        var plan = Plan()
+
+        for (w, entries) in windows.enumerated() {
+            var seats: [Seat] = []
+            for entry in entries {
+                if seated >= cap { break }
+
+                if entry.hasPrefix("s:") {
+                    let id = String(entry.dropFirst(2))
+                    guard seenIDs.insert(id).inserted else { continue }
+                    // Gone, or emptied since. Nothing to offer back, and the
+                    // file should not sit in the folder being offered back
+                    // forever.
+                    guard let text = Scratch.read(id) else { Scratch.remove(id); continue }
+                    seats.append(.buffer(id: id, text: text))
+                    seated += 1
+                    continue
+                }
+
+                let path = entry.hasPrefix("f:") ? String(entry.dropFirst(2)) : entry
+                guard !path.isEmpty, fm.isReadableFile(atPath: path) else { continue }
+                let url = URL(fileURLWithPath: path).standardizedFileURL
+                guard seenPaths.insert(url.path).inserted else { continue }
+                seats.append(.file(url))
+                seated += 1
+            }
+
+            // A window whose every entry has gone is not a window to make. It
+            // is also how a window that had nothing in it comes back as
+            // nothing: an untitled document nobody has typed in is not
+            // recorded, so the group it left behind is empty, and an empty
+            // window is not a thing to remember.
+            guard !seats.isEmpty else { continue }
+            if w == frontWindow { plan.frontWindow = plan.windows.count }
+            plan.windows.append(seats)
+            plan.fronts.append(max(0, min(w < fronts.count ? fronts[w] : 0, seats.count - 1)))
+        }
+
+        // The window that was in front may be one of the ones that came back
+        // empty, in which case the first that did come back is in front.
+        plan.frontWindow = min(plan.frontWindow, max(0, plan.windows.count - 1))
+        return plan
+    }
+}
 
 // ============================================================================
 // Small helpers
@@ -2665,12 +2850,13 @@ final class MainWindow: NSWindow {
 // ends up with two answers. So the coordination lives on AppDelegate and walks
 // every window's tabs, and this type asks it. See `app`.
 //
-// What keeps it to one question per file is that a document is only open once:
-// openDocument brings forward the tab that already has the file rather than
-// making a second one with its own undo stack and its own autosave. That check
-// reads this window's strip, which is the whole of the strip there is. It is
-// the one thing here that a second window would make less than true, and it is
-// left written down rather than guessed at.
+// What keeps it to one question per file is that a document is open in one
+// place in the whole app: openDocument asks the app which window already holds
+// the file, brings that window forward and activates that tab, rather than
+// making a second one with its own undo stack and its own autosave aimed at the
+// same path. Every route into a document goes through that one question — see
+// AppDelegate.openTab(for:) — and it is what the coordination rests on, because
+// one tab per file is what makes one presenter and one watch per file possible.
 // ============================================================================
 
 final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNavigationDelegate {
@@ -2713,14 +2899,6 @@ final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNaviga
     var tabs: [DocTab] = []
     var activeID = 0
 
-    /// Paths whose documents have been asked for and not arrived. A read is
-    /// unbounded now, so there is a real stretch of time between wanting a
-    /// document and having it, and asking twice inside that stretch — a second
-    /// ⌘O, a double-click on a file a sync client is holding — would otherwise
-    /// end with one file open in two tabs, each with its own undo stack and its
-    /// own autosave aimed at the same path.
-    var opening: Set<String> = []
-
     var activeTab: DocTab? { tabs.first { $0.id == activeID } }
     func tab(_ id: Int) -> DocTab? { tabs.first { $0.id == id } }
 
@@ -2735,6 +2913,25 @@ final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNaviga
 
     var webReady = false
 
+    /// What this window puts up when its page comes up. Decided when the window
+    /// is made rather than worked out afterwards, because by the time the page
+    /// is ready there is no telling from the window itself whether it is the
+    /// launch, a New Window, or one of several the session asked for.
+    enum FirstShow {
+        /// The launch window: a file the launch was asked to open, or the
+        /// session, or the welcome document when there is neither.
+        case launch
+        /// A window somebody asked for: one empty untitled document, the same
+        /// as a launch with no session behind it.
+        case blank
+        /// A window the session asked for, with its own share of the session
+        /// already in hand. Handed over rather than read here, because the
+        /// windows come up one after another and the first of them to save the
+        /// session would rewrite the strip the next one had not read yet.
+        case restoring([Session.Seat], front: Int)
+    }
+    var firstShow: FirstShow = .blank
+
     var autosaveWork: DispatchWorkItem?
 
     var zenOn = false
@@ -2745,7 +2942,12 @@ final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNaviga
     // Window + web view
     // ------------------------------------------------------------------
 
-    func buildWindow() {
+    /// `frameName` is where this window's size and position are remembered.
+    /// One name per window, and no two windows sharing one: AppKit refuses the
+    /// second window that asks for a name another has, and two windows that did
+    /// share one would open exactly on top of each other and then argue about
+    /// what to save. See AppDelegate.freeFrameName.
+    func buildWindow(frameName: String) {
         let w = MainWindow(contentRect: NSRect(x: 0, y: 0, width: 1080, height: 720),
                            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                            backing: .buffered, defer: false)
@@ -2757,6 +2959,14 @@ final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNaviga
         w.backgroundColor = .textBackgroundColor
         w.collectionBehavior.insert(.fullScreenPrimary)
         w.tabbingMode = .disallowed
+        // The Editor owns its window — `editors` is the only thing that keeps
+        // either of them alive. A programmatically made NSWindow defaults to
+        // releasing itself when it closes, which with one window that only ever
+        // closed on the way out of the process was invisible, and with two is a
+        // crash on the first close: the window is released once by AppKit and
+        // once by the Editor going with it, and the over-release lands in the
+        // next CoreAnimation commit, nowhere near the close that caused it.
+        w.isReleasedWhenClosed = false
         w.delegate = self
 
         let cfg = WKWebViewConfiguration()
@@ -2875,11 +3085,37 @@ final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNaviga
         self.restH = rh
         self.probeH = ph
 
-        let hadSavedFrame = UserDefaults.standard.string(forKey: "NSWindow Frame \(kFrameName)") != nil
-        _ = w.setFrameAutosaveName(kFrameName)
-        if !hadSavedFrame { w.center() }
+        let hadSavedFrame = UserDefaults.standard
+            .string(forKey: "NSWindow Frame \(frameName)") != nil
+        _ = w.setFrameAutosaveName(frameName)
+        if !hadSavedFrame { placeFirstTime(w) }
         w.makeKeyAndOrderFront(nil)
         w.positionTrafficLights()
+    }
+
+    /// A window with nothing remembered about it goes in the middle of the
+    /// screen — unless there is already a window there, in which case it steps
+    /// down and across from it. A second window that opened exactly behind the
+    /// first would look like nothing had happened.
+    private func placeFirstTime(_ w: MainWindow) {
+        let others = app.editors.compactMap { $0.window }.filter { $0 !== w }
+        guard !others.isEmpty else { w.center(); return }
+        // Off the window the writer was in rather than whichever was made last,
+        // which are the same window nearly always and differ exactly when it
+        // matters. `w` is not key yet — that is the line after this call.
+        let from = others.first { $0.isKeyWindow } ?? others[others.count - 1]
+        w.setFrame(from.frame, display: false)
+        var corner = NSPoint(x: from.frame.minX + kWindowStep,
+                             y: from.frame.maxY - kWindowStep)
+        // Rather than marching a long run of windows off the bottom right of the
+        // screen, start again at its top left. Measured against the whole
+        // window, not the corner: a corner still on screen with the window's
+        // right edge past the edge of it is the case worth catching.
+        if let room = (w.screen ?? from.screen ?? NSScreen.main)?.visibleFrame,
+           corner.x + w.frame.width > room.maxX || corner.y - w.frame.height < room.minY {
+            corner = NSPoint(x: room.minX + kWindowStep, y: room.maxY - kWindowStep)
+        }
+        w.setFrameTopLeftPoint(corner)
     }
 
     func loadWebLayer() {
@@ -3128,7 +3364,7 @@ final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNaviga
 
         case "openRecent":
             if let path = body["path"] as? String, !path.isEmpty {
-                app.openRecentDocument(URL(fileURLWithPath: path))
+                app.openRecentDocument(URL(fileURLWithPath: path), in: self)
             }
 
         case "rename":
@@ -3206,10 +3442,13 @@ final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNaviga
         pushHistory { self.openInitialDocuments() }
     }
 
-    /// Whatever this launch is meant to show: a file double-clicked in Finder,
-    /// the session as it was left, or the welcome document.
+    /// Whatever this window is meant to show: a file double-clicked in Finder,
+    /// this window's share of the session as it was left, or one empty document.
     private func openInitialDocuments() {
-        if let url = app.pendingOpen {
+        // Only the launch window looks at what the launch was asked to open. A
+        // window made later must not take a file out from under it, and a window
+        // the session asked for has its own list already.
+        if case .launch = firstShow, let url = app.pendingOpen {
             app.pendingOpen = nil
             // A document arriving with the launch replaces the session rather
             // than joining it: double-clicking a file in Finder means "show me
@@ -3237,7 +3476,7 @@ final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNaviga
         // It goes up before the session rather than after it, because reads are
         // unbounded now and there is a real stretch between asking for the
         // session and having it. Without a tab, a keystroke landing in that
-        // stretch has nowhere to go. restoreSession takes this one away when the
+        // stretch has nowhere to go. restore() takes this one away when the
         // first document arrives — unless it has been typed in by then, in
         // which case it has become a document of its own and stays.
         tabs = [makeTab(url: nil)]
@@ -3245,7 +3484,19 @@ final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNaviga
         pushTabs()
         syncWindowToTab()
 
-        restoreSession()
+        switch firstShow {
+        // The session is the app's, so the app is what reads it and what makes
+        // the other windows it names. This window takes the first share of it.
+        case .launch:
+            app.restoreSession(into: self)
+        case .restoring(let seats, let front):
+            restore(seats, front: front)
+        // One empty untitled document, which is the tab above. Nothing else to
+        // do, and nothing to record: an untitled document nobody has typed in
+        // is not in the session.
+        case .blank:
+            break
+        }
     }
 
     // ------------------------------------------------------------------
@@ -3280,6 +3531,17 @@ final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNaviga
         // a question waiting, and this is the first moment there is somebody
         // in front of it to ask. Soon rather than at the next poll.
         if front.conflicted { app.lookSoon() }
+    }
+
+    /// Put a document where the writer can actually see it: this window in
+    /// front of the others and out of the Dock if it was minimised, and the tab
+    /// in front inside it. What "already open — here it is" means when the
+    /// document turns out to be in a window behind this one.
+    func reveal(_ id: Int) {
+        window?.deminiaturize(nil)
+        window?.makeKeyAndOrderFront(nil)
+        activate(id)
+        command("showTabs")
     }
 
     /// The window furniture that follows whichever document is in front.
@@ -3408,81 +3670,23 @@ final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNaviga
         }
     }
 
-    /// Reopen what was open. Returns false when there was nothing to reopen,
-    /// which is the caller's signal to leave the welcome document alone.
+    /// Reopen this window's share of the session: the seats the app settled for
+    /// it, and which of them was in front.
     ///
-    /// The answer has to be given now — the caller puts the welcome document up
-    /// on a false — but the documents cannot be. Reads are unbounded, so a file
-    /// a sync client is busy with arrives when it arrives, and a launch that
-    /// waited for the slowest one would be a window full of nothing for as long
-    /// as that took. So what is settled here is the list: which entries name a
-    /// readable file and which name a buffer, in the order they were in. That
-    /// needs no file contents and answers the question.
+    /// The list is settled before this is called — see Session.plan — because a
+    /// window has to have somewhere for a keystroke to go long before the disk
+    /// has answered. Reads are unbounded, so a file a sync client is busy with
+    /// arrives when it arrives, and a launch that waited for the slowest one
+    /// would be a window full of nothing for as long as that took.
     ///
-    /// Then the documents are read at the same time and each takes its seat as
-    /// it arrives, in the position the session recorded rather than the order
-    /// the disk answered in. Buffers have their text already and go straight
-    /// in. Nothing is ever put in the strip empty: a tab with no document in it
-    /// is a tab somebody can type into, and what they type has nowhere to go.
-    @discardableResult
-    func restoreSession() -> Bool {
-        let defaults = UserDefaults.standard
-        let fm = FileManager.default
+    /// So the documents are read at the same time and each takes its seat as it
+    /// arrives, in the position the session recorded rather than the order the
+    /// disk answered in. Buffers have their text already and go straight in.
+    /// Nothing is ever put in the strip empty: a tab with no document in it is a
+    /// tab somebody can type into, and what they type has nowhere to go.
+    func restore(_ seats: [Session.Seat], front wantSeat: Int) {
+        guard !seats.isEmpty else { return }
 
-        // The strip as it stood, in order. Older sessions only recorded paths,
-        // so those are read into the same shape rather than through a second
-        // path that would then have to be kept in step with this one.
-        var entries = defaults.stringArray(forKey: kOpenTabsKey) ?? []
-        var wantIndex = defaults.integer(forKey: kActiveTabKey)
-        if entries.isEmpty {
-            var paths = defaults.stringArray(forKey: kOpenDocsKey) ?? []
-            if paths.isEmpty, let legacy = defaults.string(forKey: kLastDocKey) { paths = [legacy] }
-            entries = paths.map { "f:" + $0 }
-            wantIndex = defaults.integer(forKey: kActiveDocKey)
-        }
-
-        // Buffers on disk that the session does not mention. That is what a
-        // crash leaves behind — the strip was recorded before the buffer was
-        // written, or the write and the crash crossed — and they are the whole
-        // reason the folder exists, so they are offered back at the end of the
-        // strip rather than dropped.
-        var named = Set<String>()
-        for entry in entries where entry.hasPrefix("s:") { named.insert(String(entry.dropFirst(2))) }
-        for id in Scratch.all() where !named.contains(id) { entries.append("s:" + id) }
-
-        /// One seat in the strip: a crash-insurance buffer, whose text is
-        /// already in hand, or a path whose document has still to be read.
-        enum Seat {
-            case buffer(id: String, text: String)
-            case file(URL)
-        }
-
-        var seenPaths = Set<String>()
-        var seenIDs = Set<String>()
-        var seats: [Seat] = []
-
-        for entry in entries {
-            if seats.count >= kMaxRestoredTabs { break }
-
-            if entry.hasPrefix("s:") {
-                let id = String(entry.dropFirst(2))
-                guard seenIDs.insert(id).inserted else { continue }
-                // Gone, or emptied since. Nothing to offer back, and the file
-                // should not sit in the folder being offered back forever.
-                guard let text = Scratch.read(id) else { Scratch.remove(id); continue }
-                seats.append(.buffer(id: id, text: text))
-                continue
-            }
-
-            let path = entry.hasPrefix("f:") ? String(entry.dropFirst(2)) : entry
-            guard !path.isEmpty, fm.isReadableFile(atPath: path) else { continue }
-            let url = URL(fileURLWithPath: path).standardizedFileURL
-            guard seenPaths.insert(url.path).inserted else { continue }
-            seats.append(.file(url))
-        }
-        guard !seats.isEmpty else { return false }
-
-        let wantSeat = max(0, min(wantIndex, seats.count - 1))
         var taken: [Int: DocTab] = [:]
         var outstanding = seats.count
         var busy: [String] = []
@@ -3584,7 +3788,6 @@ final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNaviga
                 }
             }
         }
-        return true
     }
 
     // ------------------------------------------------------------------
@@ -4000,21 +4203,23 @@ final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNaviga
     ///
     /// `then` runs on main, with whether a document ended up open.
     func openDocument(at url: URL, then: ((Bool) -> Void)? = nil) {
-        // Already open. Two tabs on one file would give it two undo stacks and
-        // two autosaves racing for the same path, so this brings the one that
-        // exists forward instead.
-        if let open = tabs.first(where: { $0.url?.standardizedFileURL == url.standardizedFileURL }) {
-            activate(open.id)
-            command("showTabs")
+        // Already open, in this window or in another. Two tabs on one file would
+        // give it two undo stacks and two autosaves racing for the same path, so
+        // this brings the one that exists forward instead — the window as well
+        // as the tab, because a tab behind another window is not forward.
+        if let (editor, open) = app.openTab(for: url) {
+            editor.reveal(open.id)
             then?(true)
             return
         }
         // The same guard, for a document that has been asked for and has not
         // arrived. Without it a second ⌘O — or an impatient double-click while
         // a sync client is holding the file — ends with one file in two tabs
-        // the moment the disk answers.
+        // the moment the disk answers. On the app rather than on this window,
+        // for the same reason as the check above: the second ⌘O can be in
+        // another window.
         let pending = url.standardizedFileURL.path
-        guard opening.insert(pending).inserted else { then?(false); return }
+        guard app.opening.insert(pending).inserted else { then?(false); return }
 
         var arrived = false
         DispatchQueue.main.asyncAfter(deadline: .now() + kSlowOpenNotice) { [weak self] in
@@ -4024,7 +4229,7 @@ final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNaviga
 
         app.readTextFile(url) { outcome in
             arrived = true
-            self.opening.remove(pending)
+            self.app.opening.remove(pending)
 
             let file: AppDelegate.TextFile
             switch outcome {
@@ -4050,12 +4255,11 @@ final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNaviga
 
             // The world moved while the disk was answering. Something else may
             // have opened this document in the meantime — the session, a drop,
-            // a wikilink — and one file in two tabs is the thing the guard at
-            // the top exists to prevent, so it is asked again down here.
-            if let open = self.tabs.first(where: {
-                $0.url?.standardizedFileURL == url.standardizedFileURL
-            }) {
-                self.activate(open.id)
+            // a wikilink, another window — and one file in two tabs is the thing
+            // the guard at the top exists to prevent, so it is asked again down
+            // here, of the whole app again.
+            if let (editor, open) = self.app.openTab(for: url) {
+                editor.reveal(open.id)
                 then?(true)
                 return
             }
@@ -4182,6 +4386,20 @@ final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNaviga
         panel.isExtensionHidden = false
         panel.beginSheetModal(for: window) { response in
             guard response == .OK, let url = panel.url else { done(false); return }
+            // The other way to end up with one file in two places, and the one
+            // two windows make easy: an untitled document in each, both saved
+            // under the same name. Opening refuses it, so saving does too. The
+            // panel has already asked about replacing the file; what it cannot
+            // know is that something in this app has it open, with its own undo
+            // stack and its own autosave about to aim at the same path.
+            if let (_, other) = self.app.openTab(for: url), other !== target {
+                self.presentError("“\(url.lastPathComponent)” is already open",
+                                  "minimark keeps one document in one place, so two copies of "
+                                  + "it cannot save over each other. Close it where it is open, "
+                                  + "or save this one under another name.")
+                done(false)
+                return
+            }
             // Nothing is checked against it — the panel has already asked about
             // anything at that path — but it is how the document's base moves
             // to the file it is about to be, so its next save expects its own.
@@ -4763,6 +4981,87 @@ final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNaviga
         return false
     }
 
+    /// The window is going, and everything that was true because it was here
+    /// stops being true now: `front`, `allTabs`, what the quit has left to ask
+    /// about, and what the session says was open.
+    ///
+    /// The file seats go first. The reconcilers walk every window's tabs, so a
+    /// tab in no window is never visited again and whatever it registered on the
+    /// filesystem's behalf would stay registered on a document nobody has open.
+    func windowWillClose(_ note: Notification) {
+        // `editors` is what owns a window, so taking this one out of it lets the
+        // last reference to it go — and there is work after that line. Held to
+        // the end of the method rather than trusting the notification to have
+        // kept a reference of its own, which it does not promise to.
+        withExtendedLifetime(self) {
+            // A quit is not a writer closing a window, and the difference is the
+            // session. AppKit closes every window on the way out, one at a time;
+            // if each of them took itself out of `editors` and rewrote the strip
+            // on the way, the last one to go would leave a session describing
+            // only itself, and a writer who quit with two windows open would get
+            // one of them back. Nothing below needs doing on this path either:
+            // the quit asks every page for its history, drops the file seats
+            // once through dropFileWatching, and then the process goes.
+            guard !app.terminating else { return }
+
+            // The last window closing is the app going, and everything below is
+            // either already handled on that path or must not happen on it.
+            //
+            // The quit asks every page for the last of its history and waits for
+            // the answer, and it finds the pages to ask through `editors` — so
+            // the last window stays in that list until the process goes, exactly
+            // as it did when there could only be one. Taking it out here would
+            // send the quit down its no-window path, which flushes the store
+            // without asking, and up to twenty seconds of snapshots would go
+            // with it. The file seats are given up by dropFileWatching on the
+            // way out, and the session is deliberately left describing what was
+            // open: writing an empty strip here would mean closing the last
+            // window quietly threw the session away, which is the one thing
+            // quitting has never done.
+            guard app.editors.count > 1 else { return }
+
+            for tab in tabs { app.releaseFileWatching(tab) }
+            // Nothing left to save itself into: a save this window owed is
+            // already issued by the time it gets here, and a debounce still
+            // waiting is aimed at documents that have been dealt with.
+            autosaveWork?.cancel()
+
+            // And nothing AppKit does to the window from here on comes back
+            // to an Editor that is on its way out, which is what removing it
+            // from `editors` starts: `editors` is the only strong reference
+            // there is to one.
+            window?.delegate = nil
+            app.editors.removeAll { $0 === self }
+            app.suddenTermination()
+            // And the session stops mentioning a window the writer has closed.
+            app.saveSession()
+
+            // The page goes with the window — after it has been asked for its
+            // unwritten history, which lives only in the page for as long as
+            // twenty seconds and has no other chance to be asked for. There is
+            // no hurry about the answer, unlike the quit's: the app is still
+            // running and the store's write is queued either way.
+            //
+            // Then it is let go of, and both halves of that matter. A WKWebView
+            // is a process of its own, and userContentController takes a strong
+            // reference to its script message handler — which is this window —
+            // so without this a closed window would keep itself and a whole
+            // WebContent process alive for the rest of the session.
+            let letGo = { [weak self] in
+                guard let self = self else { return }
+                self.webReady = false
+                self.web?.configuration.userContentController
+                    .removeScriptMessageHandler(forName: kBridge)
+                self.web?.stopLoading()
+            }
+            guard webReady else { letGo(); return }
+            fetchHistory { json in
+                if let json = json, !json.isEmpty { self.app.history.write(json) }
+                letGo()
+            }
+        }
+    }
+
     func windowDidResize(_ note: Notification)     { window?.positionTrafficLights() }
     func windowDidBecomeKey(_ note: Notification)  { window?.positionTrafficLights() }
     func windowDidEndLiveResize(_ note: Notification) { window?.positionTrafficLights() }
@@ -4834,6 +5133,9 @@ final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNaviga
         switch name {
         case "new":        newDocument()
         case "newTab":     newDocument()
+        // The one item here that is not this window's business: a window of
+        // its own is the app's to make, and the page has no other way to ask.
+        case "newWindow":  app.newWindow(showing: .blank)
         case "closeTab":   closeActiveTab()
         case "open":       openPanel()
         case "save":       saveDocument { _ in }
@@ -4850,9 +5152,9 @@ final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNaviga
         }
     }
 
-    /// New and New Tab are the same act in a one-window app: a blank document
-    /// alongside the others rather than over the top of one. Nothing is
-    /// discarded, so nothing has to be asked about first.
+    /// A blank document in this window, alongside the others rather than over
+    /// the top of one. Nothing is discarded, so nothing has to be asked about
+    /// first. A whole new window is AppDelegate.menuNewWindow.
     func newDocument() {
         newTab()
         command("showTabs")
@@ -5084,8 +5386,13 @@ final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNaviga
                 }
                 // Every document holding a link to this name has just stopped
                 // being wrong about it. The answers are cached per folder in
-                // the page, so they have to be dropped rather than waited out.
-                self.js("if(window.App&&App.forgetWikiTargets)App.forgetWikiTargets()")
+                // the page, so they have to be dropped rather than waited out —
+                // in every window, because what changed is the folder, and a
+                // document open in another window is as wrong about it as this
+                // one was.
+                for editor in self.app.editors {
+                    editor.js("if(window.App&&App.forgetWikiTargets)App.forgetWikiTargets()")
+                }
                 self.openDocument(at: url)
             })
         }
@@ -5207,14 +5514,28 @@ final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNaviga
 final class AppDelegate: NSObject, NSApplicationDelegate,
                          NSMenuItemValidation, NSMenuDelegate {
 
-    /// Every open window. Exactly one today; the order is the order they were
-    /// made, which is what the session writes out.
+    /// Every open window, in the order they were made, which is the order the
+    /// session writes them out in. A window takes itself out of here as it
+    /// closes — see Editor.windowWillClose — so everything below is about the
+    /// windows that are actually on screen.
     var editors: [Editor] = []
 
     /// The window a menu command, a palette entry or a recent document means:
-    /// the one in front. There is only one to be in front today, and the
-    /// fallback is what keeps that true before the window has become key.
+    /// the one in front. The fallback is what keeps this answering during the
+    /// moments there is no key window — a launch before the first window has
+    /// become key, a sheet up somewhere, the app not active at all.
     var front: Editor? { editors.first { $0.window?.isKeyWindow == true } ?? editors.first }
+
+    /// Paths whose documents have been asked for and not arrived. A read is
+    /// unbounded, so there is a real stretch of time between wanting a document
+    /// and having it, and asking twice inside that stretch — a second ⌘O, a
+    /// double-click on a file a sync client is holding, the same file asked for
+    /// in two windows — would otherwise end with one file open in two tabs, each
+    /// with its own undo stack and its own autosave aimed at the same path.
+    ///
+    /// The app's rather than a window's, because that is the scope of the rule
+    /// it is half of: the other half is openTab(for:).
+    var opening: Set<String> = []
 
     /// Every open document in the app, whichever window it is in. The
     /// coordination is answerable for all of them at once: one presenter and
@@ -5229,12 +5550,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate,
         editors.flatMap { editor in editor.tabs.map { (editor, $0) } }
     }
 
+    /// The same list again with the window in front at the head of it. What the
+    /// poll walks: when the files under two windows have both changed, the
+    /// question worth asking first is the one about the document the writer is
+    /// actually looking at, because only one question is asked at a time.
+    var frontFirstTabs: [(Editor, DocTab)] {
+        guard let front = front else { return allTabsAndWindows }
+        return front.tabs.map { (front, $0) }
+            + editors.filter { $0 !== front }.flatMap { e in e.tabs.map { (e, $0) } }
+    }
+
     /// Which window a document is in. The presenter callbacks and the poll
     /// arrive with a tab and nothing else, and what they do about it — a
     /// message to a page, an autosave, a sheet — belongs to the window the tab
     /// is in.
     func editor(of tab: DocTab) -> Editor? {
         editors.first { $0.tabs.contains { $0 === tab } }
+    }
+
+    /// The tab that already has this file open, and the window it is in.
+    ///
+    /// ONE FILE IS OPEN IN ONE PLACE, and this is the question that enforces it.
+    /// Two tabs on one path means two undo stacks, two autosaves racing for it,
+    /// and — because the coordination keys off tabs — a second presenter and a
+    /// second watch on a file one writer is editing. Asked of the whole app
+    /// rather than of one window, because that is the scope the rule has to
+    /// have: a file open in a window behind this one is open.
+    ///
+    /// Every route into a document goes through here: ⌘O and the open panel, a
+    /// double-click in Finder, Open Recent, a wikilink, a drop, and Save As
+    /// choosing a name something else has. The session has the same rule applied
+    /// once, across every window, before a launch puts anything up — see
+    /// Session.plan.
+    func openTab(for url: URL) -> (Editor, DocTab)? {
+        let want = url.standardizedFileURL
+        return allTabsAndWindows.first { $0.1.url?.standardizedFileURL == want }
     }
 
     /// A tab id nobody else in this process has. Per-app rather than
@@ -5248,14 +5598,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate,
         return id
     }
 
-    /// One more window, with nothing in it yet. Called once, at launch.
+    /// One more window. `showing` is what it puts up once its page is ready: an
+    /// empty document for a window somebody asked for, the launch's business for
+    /// the first one, its own share of the session for a window the session
+    /// named.
     @discardableResult
-    func newWindow() -> Editor {
+    func newWindow(showing: Editor.FirstShow = .blank) -> Editor {
         let editor = Editor(app: self)
+        editor.firstShow = showing
         editors.append(editor)
-        editor.buildWindow()
+        editor.buildWindow(frameName: freeFrameName())
         editor.loadWebLayer()
         return editor
+    }
+
+    /// A frame name no open window is using, so each window remembers its own
+    /// size and position. The first one is kFrameName unchanged, which is what
+    /// keeps a frame saved by every earlier build; the rest are numbered off it,
+    /// and the lowest free number is taken rather than the next one, so closing
+    /// a window and opening another does not hand out a name that is still in
+    /// use — AppKit refuses the second window to ask for a name, and stops
+    /// saving that window's frame at all.
+    private func freeFrameName() -> String {
+        let taken = Set(editors.compactMap { $0.window?.frameAutosaveName })
+        var n = 1
+        while true {
+            let name = n == 1 ? kFrameName : "\(kFrameName) \(n)"
+            if !taken.contains(name) { return name }
+            n += 1
+        }
     }
 
     /// The user stylesheet as the page last saw it. Kept so that re-reading
@@ -5281,9 +5652,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate,
     /// A look asked for by a kernel watch and not yet taken. See lookSoon.
     var watchLookPending = false
     /// Whether the changed-on-disk question is on screen. One at a time in the
-    /// whole app: the poll walks every window's documents and stops at the
-    /// first one worth asking about, so a second sheet cannot arrive on top of
-    /// the first, in this window or another.
+    /// whole app rather than one per window, which is a choice and not an
+    /// oversight.
+    ///
+    /// The sheet itself belongs to the window holding the document — it is that
+    /// document's question and it is asked where the document is. But whether
+    /// another may be asked is the app's business, because the person being
+    /// asked is one person. A `git checkout` under a folder open across three
+    /// windows is three sheets at once if this is per window, and the writer
+    /// answers the one in front while two more wait behind it for questions they
+    /// have forgotten the context of. So the poll walks every window's documents,
+    /// the front window's first, and stops at the first one worth asking about;
+    /// the rest keep their old modification date and are asked about on the next
+    /// pass, which is exactly what a background tab in one window already did.
+    ///
+    /// What it costs: a document changing in a window behind can hold the
+    /// question about it until an earlier one is answered. That is one poll
+    /// interval, and the save that would have raced it is refused in the
+    /// meantime, because the document's base does not move until the question is
+    /// answered.
     var reloadPromptUp = false
     var terminating = false
     var terminateReplied = false
@@ -5306,7 +5693,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate,
     func applicationDidFinishLaunching(_ note: Notification) {
         NSApp.setActivationPolicy(.regular)
         buildMenu()
-        newWindow()
+        newWindow(showing: .launch)
         startWatching()
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -5318,7 +5705,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate,
         // All of them now, each into its own tab. Selecting six files in Finder
         // and pressing Return used to open one and silently drop five.
         let urls = filenames.map { URL(fileURLWithPath: $0) }
-        if let editor = front, editor.webReady {
+        // The window in front, or any window whose page is up if the one in
+        // front is a window that has only just been made. Only "nowhere to put
+        // them at all" goes in the inbox below, and after the launch there is
+        // always somewhere — which is what keeps the inbox a launch-time thing
+        // that the launch window is guaranteed to come and empty.
+        let target = front?.webReady == true ? front : editors.first { $0.webReady }
+        if let editor = target {
             editor.openDocuments(urls)
             if !urls.isEmpty { editor.command("showTabs") }
         } else if let first = urls.first {
@@ -5362,7 +5755,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate,
         // finishTerminate can reply to it.
         guard editors.contains(where: { $0.webReady }) else {
             history.flush()
-            if !allTabs.contains(where: { $0.dirty }) { terminating = false; return .terminateNow }
+            // The flag stays set, unlike a cancelled attempt: the windows are
+            // about to close, and windowWillClose reads it to know that it is a
+            // quit doing the closing and not the writer.
+            if !allTabs.contains(where: { $0.dirty }) { return .terminateNow }
             DispatchQueue.main.async { self.finishTerminate() }
             return .terminateLater
         }
@@ -5492,21 +5888,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate,
 
             guard !untitled.isEmpty else { self.replyToTerminate(true); return }
 
-            // Nowhere on disk to go and something in them: ask, one at a time.
+            // Nowhere on disk to go and something in them: ask, one at a time,
+            // in whichever window each of them is in. No document can be asked
+            // about twice, because a document is open in one place — and one of
+            // these has no path at all, so it cannot even be the same file as
+            // another. No watchdog on any of it: it is waiting on a person, and
+            // quitting out from under them is the data loss it exists to stop.
+            //
             // A sheet needs a window that is actually on screen — without one
             // beginSheetModal never presents and its completion never runs,
             // which would leave the quit hanging on a reply that can no longer
-            // come. No watchdog on this one: it is waiting on a person, and
-            // quitting out from under them is the data loss it exists to stop.
-            guard self.editors.contains(where: { $0.window?.isVisible == true }) else {
-                self.replyToTerminate(true); return
-            }
+            // come. With one window that was a window or nothing; with several it
+            // is also a window that has been put in the Dock, which is why each
+            // window is brought out and forward before it is asked. It is the
+            // honest thing to do anyway: a sheet the writer cannot see is a quit
+            // that appears to have hung.
+            guard !self.editors.isEmpty else { self.replyToTerminate(true); return }
 
             var queue = untitled
             func step() {
                 guard !queue.isEmpty else { self.replyToTerminate(true); return }
                 let next = queue.removeFirst()
                 guard let editor = self.editor(of: next) else { step(); return }
+                editor.window?.deminiaturize(nil)
+                editor.window?.makeKeyAndOrderFront(nil)
                 editor.confirmClose(next) { ok in
                     guard ok else { self.replyToTerminate(false); return }
                     step()
@@ -5576,23 +5981,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate,
     // Session
     // ------------------------------------------------------------------
 
-    /// One session for the app, whatever it is spread across. The keys hold a
-    /// flat strip of documents and cannot describe a window, so what goes out
-    /// is every window's tabs in the order the windows were made, and the one
-    /// document that was in front of the writer.
+    /// One session for the app, window by window: each window's strip in the
+    /// order the windows were made, each window's own front document, and which
+    /// window the writer was in. Session is what knows how that is spelled out
+    /// so an older build still reads it.
+    ///
+    /// An untitled buffer only earns a place once it has been written, or the
+    /// next launch would offer back a tab with nothing in it — which is also why
+    /// a window with nothing but an empty document in it leaves nothing behind.
     func saveSession() {
         let defaults = UserDefaults.standard
         let inFront = front?.activeTab
 
-        // The whole strip, untitled buffers included. A buffer only earns a
-        // place once it has been written, or the next launch would offer back
-        // a tab with nothing in it.
-        let strip = allTabs.filter { $0.url != nil || $0.scratchText != nil }
-        defaults.set(strip.map { tab -> String in
-            if let url = tab.url { return "f:" + url.path }
-            return "s:" + tab.scratchID
-        }, forKey: kOpenTabsKey)
-        defaults.set(strip.firstIndex { $0 === inFront } ?? 0, forKey: kActiveTabKey)
+        var windows: [[String]] = []
+        var fronts: [Int] = []
+        var frontWindow = 0
+        for editor in editors {
+            let mine = editor.tabs.filter { $0.url != nil || $0.scratchText != nil }
+            guard !mine.isEmpty else { continue }
+            if editor === front { frontWindow = windows.count }
+            fronts.append(mine.firstIndex { $0 === editor.activeTab } ?? 0)
+            windows.append(mine.map { tab -> String in
+                if let url = tab.url { return "f:" + url.path }
+                return "s:" + tab.scratchID
+            })
+        }
+        Session.write(windows, fronts: fronts, frontWindow: frontWindow, to: defaults)
 
         let saved = allTabs.filter { $0.url != nil }
         defaults.set(saved.map { $0.url!.path }, forKey: kOpenDocsKey)
@@ -5601,6 +6015,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate,
         // finds the document that was in front.
         if let url = inFront?.url { defaults.set(url.path, forKey: kLastDocKey) }
         else { defaults.removeObject(forKey: kLastDocKey) }
+    }
+
+    /// Reopen the session, across as many windows as it was left in. The window
+    /// that asked takes the first share of it, because it is the one already on
+    /// screen; one more window is made for each of the rest. Answers false when
+    /// there was nothing to reopen, which is the caller's signal to leave the
+    /// welcome document where it is.
+    ///
+    /// Read once, here, and handed out — rather than each window going back to
+    /// UserDefaults as its page comes up. The first window putting its documents
+    /// up saves the session as it goes, so a second window reading the strip
+    /// afterwards would find it already rewritten to whatever had landed, and
+    /// reopen that instead of its own.
+    @discardableResult
+    func restoreSession(into first: Editor) -> Bool {
+        let plan = Session.plan(cap: kMaxRestoredTabs)
+        guard !plan.isEmpty else { return false }
+
+        var made = [first]
+        first.restore(plan.windows[0], front: plan.fronts[0])
+        for i in 1..<plan.windows.count {
+            made.append(newWindow(showing: .restoring(plan.windows[i], front: plan.fronts[i])))
+        }
+        // The window that was in front goes back in front. The windows are made
+        // in order and each orders itself forward as it appears, so without this
+        // the last one made would be the one the writer arrives in.
+        if plan.frontWindow < made.count {
+            made[plan.frontWindow].window?.makeKeyAndOrderFront(nil)
+        }
+        return true
     }
 
     // ------------------------------------------------------------------
@@ -6270,7 +6714,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate,
     /// compared against the tab's digest like anything else. See DocWatch.
     func checkFileOnDisk() {
         guard !reloadPromptUp else { return }
-        for (editor, tab) in allTabsAndWindows {
+        for (editor, tab) in frontFirstTabs {
             guard let url = tab.url else { continue }
             guard let now = fileMark(url) else { editor.noteMissing(tab, at: url); continue }
             // There is a file here, so whatever the last few looks thought is
@@ -6600,7 +7044,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate,
         openRecentDocument(url)
     }
 
-    func openRecentDocument(_ url: URL) {
+    /// `in` is the window that asked. The menu has no window of its own so it
+    /// means the one in front; a palette does, and the page that asked is the
+    /// window that answers — which is the same window nearly always, and is the
+    /// right one on the occasion it is not.
+    func openRecentDocument(_ url: URL, in editor: Editor? = nil) {
         // Both the menu and the palette are built from readable files only, so
         // this is a race guard: the file went while the list was on screen.
         guard FileManager.default.isReadableFile(atPath: url.path) else {
@@ -6609,7 +7057,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate,
                          "The file has been moved, renamed or deleted.")
             return
         }
-        front?.openDocument(at: url)
+        (editor ?? front)?.openDocument(at: url)
     }
 
     /// The recent list is the app's — NSDocumentController keeps it, and which
@@ -6632,6 +7080,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate,
     // on Editor is the same list reached from the palette, where the page that
     // asked is the window that answers.
     // ------------------------------------------------------------------
+
+    /// A window of its own, with one empty untitled document in it, the same as
+    /// a launch with no session behind it. Nothing is asked first: nothing is
+    /// being replaced or discarded.
+    @objc func menuNewWindow(_ sender: Any?) { newWindow(showing: .blank) }
 
     @objc func menuNew(_ sender: Any?) { front?.newDocument() }
 
@@ -6865,10 +7318,11 @@ extension AppDelegate {
 
         // ---- File --------------------------------------------------------
         let file = submenu(main, "File")
-        // Two names for the one act. minimark has a single window, so a new
-        // document is always a new tab; ⌘N is what every Mac app trains you to
-        // press and ⌘T is what everything with tabs does.
-        add(file, "New", key: "n", action: #selector(menuNew(_:)), target: self)
+        // Two acts now, and each keeps the key it has everywhere else on a Mac:
+        // ⌘N makes a window, ⌘T makes a tab in the window you are in. Until
+        // there could be a second window those were one item called "New", which
+        // was honest then and would be a lie now.
+        add(file, "New Window", key: "n", action: #selector(menuNewWindow(_:)), target: self)
         add(file, "New Tab", key: "t", action: #selector(menuNew(_:)), target: self)
         add(file, "Open…", key: "o", action: #selector(menuOpen(_:)), target: self)
         let recentItem = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
