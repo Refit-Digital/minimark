@@ -185,10 +185,11 @@ final class AppDelegate {
        one thing a folder of open documents can turn into: something rewriting a
        whole worktree fires one event per document — measured, 200 documents,
        200 wakeups — and each of those turning into a pass over every tab would
-       be 40,000. \`private\` reaches the enclosing type and not the file's top
-       level, hence the one line of wrapper. */
+       be 40,000. It is \`fileprivate\` in the app because a window asks for a
+       look and the app is what takes it; either way it does not reach the
+       file's top level, hence the one line of wrapper. */
     var watchLookPending = false
-${extract('    private func lookSoon')}
+${extract('    fileprivate func lookSoon')}
     func askForALook() { lookSoon() }
 }
 

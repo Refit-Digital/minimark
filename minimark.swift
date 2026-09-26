@@ -2652,21 +2652,42 @@ final class MainWindow: NSWindow {
 }
 
 // ============================================================================
-// The app
+// One window
+//
+// Everything a writer can see is here: the window, the web view the document
+// lives in, the chrome around it, and the strip of tabs. Nothing in this type
+// is shared with anything else, which is what makes a second one possible.
+//
+// What is deliberately NOT here is anything the filesystem cares about. There
+// is one presenter and one kernel watch per open document, and one poll that
+// looks at all of them, and those belong to the app rather than to a window —
+// two windows asking the same file two different questions is how a document
+// ends up with two answers. So the coordination lives on AppDelegate and walks
+// every window's tabs, and this type asks it. See `app`.
+//
+// What keeps it to one question per file is that a document is only open once:
+// openDocument brings forward the tab that already has the file rather than
+// making a second one with its own undo stack and its own autosave. That check
+// reads this window's strip, which is the whole of the strip there is. It is
+// the one thing here that a second window would make less than true, and it is
+// left written down rather than guessed at.
 // ============================================================================
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
-                         WKScriptMessageHandler, WKNavigationDelegate, NSMenuItemValidation,
-                         NSMenuDelegate {
+final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNavigationDelegate {
+
+    /// The app this window belongs to. Unowned because the app delegate is
+    /// owned by NSApplication for the life of the process, and a window that
+    /// outlived it would have nothing to be a window of.
+    unowned let app: AppDelegate
+
+    init(app: AppDelegate) {
+        self.app = app
+        super.init()
+    }
 
     var window: MainWindow!
     var web: WKWebView!
 
-    /// The user stylesheet as the page last saw it. Kept so that re-reading
-    /// the file on every activation is free when nothing has changed, which
-    /// is nearly always: without it, every switch back to the app would push
-    /// a <style> replacement and make the document flash.
-    var lastUserCSS: String? = nil
     var strip: DragStrip!            // the bar: takes the mouse where the chrome is
     var edge: DragStrip!             // slim grabbable margin along the top
     var stripX: NSLayoutConstraint!  // slides that strip to follow the bar
@@ -2691,7 +2712,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     var tabs: [DocTab] = []
     var activeID = 0
-    private var nextTabID = 1
+
     /// Paths whose documents have been asked for and not arrived. A read is
     /// unbounded now, so there is a real stretch of time between wanting a
     /// document and having it, and asking twice inside that stretch — a second
@@ -2699,8 +2720,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     /// end with one file open in two tabs, each with its own undo stack and its
     /// own autosave aimed at the same path.
     var opening: Set<String> = []
-    /// Whether sudden termination is currently disabled by us. See suddenTermination().
-    private var suddenBlocked = false
 
     var activeTab: DocTab? { tabs.first { $0.id == activeID } }
     func tab(_ id: Int) -> DocTab? { tabs.first { $0.id == id } }
@@ -2713,250 +2732,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         get { activeTab?.dirty ?? false }
         set { activeTab?.dirty = newValue }
     }
-    var recentMenu: NSMenu!
+
     var webReady = false
-    var pendingOpen: URL?
-    var pendingExtra: [URL] = []
 
-    var watchTimer: Timer?
     var autosaveWork: DispatchWorkItem?
-    /// A look asked for by a kernel watch and not yet taken. See lookSoon.
-    var watchLookPending = false
-    var reloadPromptUp = false
-    var terminating = false
-    var terminateReplied = false
-
-    let history = HistoryStore()
 
     var zenOn = false
     var zenRevealed = false
     var tabsShowing = false
-
-    // ------------------------------------------------------------------
-    // Launch
-    // ------------------------------------------------------------------
-
-    /// Coming back to the app re-reads the user stylesheet. That is the whole
-    /// edit loop for it: change user.css in whatever you edit CSS in, switch
-    /// back, see it. pushUserCSS compares against what the page already has,
-    /// so an activation that changed nothing costs one small file read and
-    /// sends no message at all.
-    func applicationDidBecomeActive(_ note: Notification) {
-        guard webReady else { return }
-        pushUserCSS()
-    }
-
-    func applicationDidFinishLaunching(_ note: Notification) {
-        NSApp.setActivationPolicy(.regular)
-        buildMenu()
-        buildWindow()
-        loadWebLayer()
-        startWatching()
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
-
-    /// Open-with and drag-onto-icon. May arrive before the web layer is ready.
-    func application(_ sender: NSApplication, openFiles filenames: [String]) {
-        // All of them now, each into its own tab. Selecting six files in Finder
-        // and pressing Return used to open one and silently drop five.
-        let urls = filenames.map { URL(fileURLWithPath: $0) }
-        if webReady {
-            openDocuments(urls)
-            if !urls.isEmpty { command("showTabs") }
-        } else if let first = urls.first {
-            pendingOpen = first
-            // Anything past the first has to wait for the web layer, which is
-            // moments away. handleReady takes pendingOpen and this takes the
-            // rest, in order, once there is somewhere to put them.
-            pendingExtra.append(contentsOf: urls.dropFirst())
-        }
-        sender.reply(toOpenOrPrint: .success)
-    }
-
-    func applicationDidResignActive(_ note: Notification) {
-        if tabs.contains(where: { $0.dirty && $0.url != nil }) { runAutosave() }
-        // Switching away is the cheapest moment there is to bank history:
-        // nobody is typing, and the write is off the main thread anyway.
-        commitHistory()
-    }
-
-    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        // A second ⌘Q while the first is still waiting would run the whole path
-        // again and reply twice, which is undefined and in practice fatal. The
-        // first attempt owns the reply.
-        //
-        // .terminateCancel rather than .terminateLater: the discard sheet below
-        // is window-modal, so the menu bar stays live and a second ⌘Q really can
-        // arrive. Answering it with .terminateLater would leave two waits
-        // outstanding against the one reply this attempt will make, and a
-        // Cancel would then wedge the app. Cancel unwinds the second attempt
-        // immediately — which is also the honest answer, since it is being
-        // ignored.
-        guard !terminating else { return .terminateCancel }
-        terminating = true
-        autosaveWork?.cancel()
-
-        // No web layer to ask: nothing can be pending, so take the fast path
-        // rather than waiting on a callback that will never arrive. The hop
-        // through the run loop is so .terminateLater is returned before
-        // finishTerminate can reply to it.
-        guard webReady else {
-            history.flush()
-            if !tabs.contains(where: { $0.dirty }) { terminating = false; return .terminateNow }
-            DispatchQueue.main.async { self.finishTerminate() }
-            return .terminateLater
-        }
-
-        // History is settled first and unconditionally. It can hold unpersisted
-        // snapshots even when the document is clean — autosave clears docDirty
-        // within a second, while the history write deliberately waits for a
-        // longer lull — so the old `guard docDirty` would have quietly dropped
-        // the last few minutes of it on every tidy quit. App.histCommit pins the
-        // present and answers null when there is genuinely nothing new, so a
-        // clean quit still costs only the round trip.
-        //
-        // The watchdog is because that round trip goes through the WebContent
-        // process. If it is killed mid-quit the completion never fires, and
-        // without this the app would sit in .terminateLater forever with no
-        // window and no way out but Force Quit.
-        var answered = false
-        let proceed: (String?) -> Void = { json in
-            if answered { return }
-            answered = true
-            if let json = json, !json.isEmpty { self.history.write(json) }
-            self.history.flush()
-            self.finishTerminate()
-        }
-        fetchHistory(proceed)
-        DispatchQueue.main.asyncAfter(deadline: .now() + kQuitTimeout) { proceed(nil) }
-        return .terminateLater
-    }
-
-    /// Exactly one reply per terminate attempt. A cancelled attempt clears both
-    /// flags so a later ⌘Q can try again; an accepted one leaves them set,
-    /// because the process is on its way out.
-    private func replyToTerminate(_ ok: Bool) {
-        guard terminating, !terminateReplied else { return }
-        terminateReplied = true
-        if !ok { terminating = false; terminateReplied = false }
-        // Last thing before going, and only on the path that is actually
-        // going. A presenter left registered while the app tears down would be
-        // asked to flush documents whose tabs are already gone.
-        if ok { dropFileWatching() }
-        NSApp.reply(toApplicationShouldTerminate: ok)
-    }
-
-    private func finishTerminate() {
-        let dirty = tabs.filter { $0.dirty }
-        guard !dirty.isEmpty else {
-            replyToTerminate(true)
-            return
-        }
-
-        // Anything with a file is simply written, the same as the autosave a
-        // second later would have. A document that has never been saved has
-        // something left to decide, and so does one whose file has gone —
-        // writing that one silently would put back a name somebody took away,
-        // on the way out, with nobody looking. Both get asked about.
-        let onDisk = dirty.filter { $0.hasFile }
-        let untitled = dirty.filter { !$0.hasFile }
-
-        let group = DispatchGroup()
-        var failed: [String] = []
-        // The ones that were not written because something else had changed
-        // the file, which is a different sentence from a folder that has gone
-        // away and a different thing to do about it.
-        var changed = 0
-
-        for tab in onDisk {
-            guard let url = tab.url else { continue }
-            group.enter()
-            var settled = false
-            let finish: (Bool) -> Void = { wrote in
-                if settled { return }
-                settled = true
-                if !wrote {
-                    failed.append(url.lastPathComponent)
-                    if tab.conflicted { changed += 1 }
-                }
-                group.leave()
-            }
-            // If the web layer cannot produce the text, leave the file as it
-            // is rather than replacing it with nothing — and say so, rather
-            // than quitting quietly over the top of the loss. A document whose
-            // file changed under it is tried as well rather than skipped: the
-            // check inside the write is the one that knows, and if it still
-            // says no, the quit stops and the question is asked.
-            let ticket = tab.base.ticket()
-            fetchText(tab.id) { text in
-                guard let text = text else { finish(false); return }
-                self.write(text, to: url, expecting: ticket, silent: true) { wrote in finish(wrote) }
-            }
-            // Same watchdog reasoning as the history fetch: this round trip
-            // goes through the WebContent process, and if that is killed
-            // mid-quit nothing else would ever reply.
-            DispatchQueue.main.asyncAfter(deadline: .now() + kQuitTimeout) { finish(false) }
-        }
-
-        group.notify(queue: .main) {
-            // Silent writes above, one honest alert here. Quitting over the top
-            // of a file that could not be written is the one outcome worth
-            // interrupting a quit for.
-            if !failed.isEmpty {
-                let alert = NSAlert()
-                alert.messageText = failed.count == 1
-                    ? "Could not save “\(failed[0])”"
-                    : "Could not save \(failed.count) documents"
-                alert.informativeText = changed == failed.count
-                    ? "Something else changed \(changed == 1 ? "it" : "them") on disk since "
-                      + "\(changed == 1 ? "it was" : "they were") last saved here, so minimark has "
-                      + "not saved over that, and has stopped quitting so nothing is lost. "
-                      + "Choose which version to keep, then quit again."
-                    : "minimark has stopped quitting so the changes are not lost. "
-                      + "Check the folder is still available, then try again."
-                alert.addButton(withTitle: "OK")
-                alert.runModal()
-                self.replyToTerminate(false)
-                return
-            }
-
-            guard !untitled.isEmpty else { self.replyToTerminate(true); return }
-
-            // Nowhere on disk to go and something in them: ask, one at a time.
-            // A sheet needs a window that is actually on screen — without one
-            // beginSheetModal never presents and its completion never runs,
-            // which would leave the quit hanging on a reply that can no longer
-            // come. No watchdog on this one: it is waiting on a person, and
-            // quitting out from under them is the data loss it exists to stop.
-            guard self.window?.isVisible == true else { self.replyToTerminate(true); return }
-
-            var queue = untitled
-            func step() {
-                guard !queue.isEmpty else { self.replyToTerminate(true); return }
-                let next = queue.removeFirst()
-                self.confirmClose(next) { ok in
-                    guard ok else { self.replyToTerminate(false); return }
-                    step()
-                }
-            }
-            step()
-        }
-    }
-
-    /// Ask the web layer for its history now, rather than waiting for its idle
-    /// timer. Used at the points where there may not be a later.
-    func commitHistory() {
-        // Not during a quit. The quit path has already committed and flushed;
-        // a commit landing after that would pin a snapshot in the web layer and
-        // queue a write that nothing is left to flush. Reachable by ⌘-Tabbing
-        // away while the discard sheet is up.
-        guard webReady, !terminating else { return }
-        fetchHistory { json in
-            if let json = json, !json.isEmpty { self.history.write(json) }
-        }
-    }
 
     // ------------------------------------------------------------------
     // Window + web view
@@ -2993,7 +2776,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         // Dropped documents join the session rather than replacing what is
         // open, so there is nothing to ask about before taking one.
         v.onDocumentFile = { [weak self] url in self?.openDocument(at: url) }
-        v.contextExtras = { [weak self] in self?.formattingMenuItems() ?? [] }
+        v.contextExtras = { [weak self] in self?.app.formattingMenuItems() ?? [] }
         // Deliberately no registerForDraggedTypes: it *replaces* the type list
         // rather than adding to it, and WKWebView registers a large one at init
         // (text, RTF, web archives, promised files). Narrowing it to .fileURL
@@ -3201,27 +2984,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             }
             done()
         }
-        history.loadAsync(finish)
+        app.history.loadAsync(finish)
         // A disk that never answers must not leave the app with no document on
         // screen. Losing the race means starting from an empty store, which is
         // the same state a first launch is in.
         DispatchQueue.main.asyncAfter(deadline: .now() + kHistoryLoadTimeout) { finish(nil) }
     }
 
+    /// The writer's own stylesheet into this page. What to send, and whether
+    /// anything has changed since the file was last read, is the app's — one
+    /// file, read once, however many windows are looking at it.
+    func sendUserCSS(_ css: String) {
+        js("if(window.App&&App.setUserCSS)App.setUserCSS(\(jsLiteral(css)))")
+    }
+
     func pushSystemTheme() {
         let dark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         js("if(window.App)App.setSystemTheme(\(jsLiteral(dark ? "dark" : "light")))")
-    }
-
-    /// The writer's own stylesheet, into the editor. It goes in after
-    /// styles.css and after the theme, so it wins on specificity ties without
-    /// anybody having to write !important, and it reaches print and PDF for
-    /// free because both of those paginate this same live web view.
-    func pushUserCSS() {
-        let css = Templates.userCSS()
-        if css == lastUserCSS { return }
-        lastUserCSS = css
-        js("if(window.App&&App.setUserCSS)App.setUserCSS(\(jsLiteral(css)))")
     }
 
     func pushSaved(_ url: URL, tab: DocTab? = nil) {
@@ -3244,8 +3023,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         // it the only place a reconciler can sit and be sure of seeing every
         // change; and the presenters have to be right during launch and session
         // restore, which is exactly when the web layer is not ready yet.
-        syncPresenters()
-        syncWatches()
+        app.syncPresenters()
+        app.syncWatches()
         guard webReady else { return }
         let rows: [[String: Any]] = tabs.map { t in
             ["id": t.id, "name": t.name, "dir": t.dir,
@@ -3290,7 +3069,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             // treats an empty file as no history at all. The web layer sends
             // "{\"docs\":{}}" when it means empty; it never means it with "".
             if let json = body["json"] as? String, !json.isEmpty {
-                history.write(json)
+                app.history.write(json)
             }
 
         case "dirty":
@@ -3303,7 +3082,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             target?.dirty = dirty
             if dirty { target?.edits += 1 }
             window?.isDocumentEdited = tabs.contains { $0.dirty }
-            suddenTermination()
+            app.suddenTermination()
             if dirty { scheduleAutosave() }
             // No pushTabs here. The strip flips its own dot as the key is
             // pressed; sending the whole list back would rebuild every tab
@@ -3349,7 +3128,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
         case "openRecent":
             if let path = body["path"] as? String, !path.isEmpty {
-                openRecentDocument(URL(fileURLWithPath: path))
+                app.openRecentDocument(URL(fileURLWithPath: path))
             }
 
         case "rename":
@@ -3417,9 +3196,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     func handleReady() {
         webReady = true
         pushPrefs()
-        pushRecents()
+        app.pushRecents()
         pushSystemTheme()
-        pushUserCSS()
+        app.sendUserCSS(to: self)
         applyChrome()
         // Everything that puts a document on screen waits for the history to
         // arrive — see pushHistory. Nothing above this needs it, so the first
@@ -3430,15 +3209,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     /// Whatever this launch is meant to show: a file double-clicked in Finder,
     /// the session as it was left, or the welcome document.
     private func openInitialDocuments() {
-        if let url = pendingOpen {
-            pendingOpen = nil
+        if let url = app.pendingOpen {
+            app.pendingOpen = nil
             // A document arriving with the launch replaces the session rather
             // than joining it: double-clicking a file in Finder means "show me
             // this", not "show me this and the nine things I had open".
             tabs = [makeTab(url: nil)]
             activeID = tabs[0].id
-            let extra = pendingExtra
-            pendingExtra = []
+            let extra = app.pendingExtra
+            app.pendingExtra = []
             // The one that was double-clicked goes back in front once the rest
             // have landed. That tab is the placeholder above, which the first
             // document adopts, so its id is known before any of them arrive.
@@ -3474,8 +3253,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     // ------------------------------------------------------------------
 
     func makeTab(url: URL?) -> DocTab {
-        let tab = DocTab(id: nextTabID, url: url, placeholder: freeUntitledName())
-        nextTabID += 1
+        let tab = DocTab(id: app.freshTabID(), url: url, placeholder: freeUntitledName())
         return tab
     }
 
@@ -3497,29 +3275,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         syncWindowToTab()
         pushTabs()
         pushEncoding()
-        saveSession()
+        app.saveSession()
         // A document whose save was refused while it was in the background has
         // a question waiting, and this is the first moment there is somebody
         // in front of it to ask. Soon rather than at the next poll.
-        if front.conflicted { lookSoon() }
-    }
-
-    /// Whether the process may be killed outright at logout or restart rather
-    /// than being asked to quit. Info.plist opts in; this takes the permission
-    /// back for as long as anything is unsaved, which is the pairing Apple's
-    /// own documents use. Without it the opt-in would mean a restart could
-    /// take the last second of typing with it — the one thing the unsaved
-    /// buffers exist to prevent.
-    ///
-    /// Counted rather than set, because disable/enable is a counter in
-    /// ProcessInfo and an unbalanced call leaks the permission for the life of
-    /// the process. `suddenBlocked` is what keeps the pairs matched.
-    func suddenTermination() {
-        let unsaved = tabs.contains { $0.dirty }
-        guard unsaved != suddenBlocked else { return }
-        suddenBlocked = unsaved
-        if unsaved { ProcessInfo.processInfo.disableSuddenTermination() }
-        else       { ProcessInfo.processInfo.enableSuddenTermination() }
+        if front.conflicted { app.lookSoon() }
     }
 
     /// The window furniture that follows whichever document is in front.
@@ -3528,13 +3288,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         window?.representedURL = url
         window?.title = url?.lastPathComponent ?? "minimark"
         window?.isDocumentEdited = tabs.contains { $0.dirty }
-        suddenTermination()
+        app.suddenTermination()
         if let url = url {
             // NSDocumentController keeps the list for us — deduped, capped,
             // persisted, and shared with the Dock menu and the Apple menu's
             // Recent Items. No second copy of it in UserDefaults.
             NSDocumentController.shared.noteNewRecentDocumentURL(url)
-            pushRecents()
+            app.pushRecents()
         }
     }
 
@@ -3550,7 +3310,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         // give it two chances to disagree with itself.
         pushTabs()
         syncWindowToTab()
-        saveSession()
+        app.saveSession()
     }
 
     func closeTab(_ id: Int) {
@@ -3569,7 +3329,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             // Out of the strip, so the reconcilers in pushTabs will never visit
             // it again: whatever it holds on the filesystem's behalf has to go
             // here or it never goes at all.
-            self.releaseFileWatching(doomed)
+            self.app.releaseFileWatching(doomed)
             // Belt and braces: confirmClose has already dropped it on both of
             // the paths that can create one, and a tab nobody has open must
             // not be able to leave a buffer behind whatever route it took.
@@ -3583,7 +3343,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             }
             self.pushTabs()
             self.syncWindowToTab()
-            self.saveSession()
+            self.app.saveSession()
         }
     }
 
@@ -3593,7 +3353,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         guard dest != from else { return }
         tabs.insert(tabs.remove(at: from), at: dest)
         pushTabs()
-        saveSession()
+        app.saveSession()
     }
 
     /// Everything that has to happen before a tab can go away. A document with
@@ -3641,37 +3401,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 // Discarded on purpose. Leaving the buffer behind would offer
                 // it back at the next launch as though it had been lost.
                 tab.forgetScratch()
-                self.saveSession()
+                self.app.saveSession()
                 done(true)
             default:                       done(false)
             }
         }
-    }
-
-    // ------------------------------------------------------------------
-    // Session
-    // ------------------------------------------------------------------
-
-    func saveSession() {
-        let defaults = UserDefaults.standard
-
-        // The whole strip, untitled buffers included. A buffer only earns a
-        // place once it has been written, or the next launch would offer back
-        // a tab with nothing in it.
-        let strip = tabs.filter { $0.url != nil || $0.scratchText != nil }
-        defaults.set(strip.map { tab -> String in
-            if let url = tab.url { return "f:" + url.path }
-            return "s:" + tab.scratchID
-        }, forKey: kOpenTabsKey)
-        defaults.set(strip.firstIndex { $0.id == activeID } ?? 0, forKey: kActiveTabKey)
-
-        let saved = tabs.filter { $0.url != nil }
-        defaults.set(saved.map { $0.url!.path }, forKey: kOpenDocsKey)
-        defaults.set(saved.firstIndex { $0.id == activeID } ?? 0, forKey: kActiveDocKey)
-        // Written alongside so a build without tabs, or an older one, still
-        // finds the document that was in front.
-        if let url = activeTab?.url { defaults.set(url.path, forKey: kLastDocKey) }
-        else { defaults.removeObject(forKey: kLastDocKey) }
     }
 
     /// Reopen what was open. Returns false when there was nothing to reopen,
@@ -3811,11 +3545,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         for (seat, entry) in seats.enumerated() {
             switch entry {
             case .buffer(let id, let text):
-                let tab = DocTab(id: nextTabID, url: nil,
+                let tab = DocTab(id: app.freshTabID(), url: nil,
                                  placeholder: freeUntitledName(
                                      among: tabs.filter { $0 !== welcome }),
                                  scratchID: id)
-                nextTabID += 1
                 // Never saved, and still not saved. Dirty is the truth about
                 // it, and it is also what makes quit ask rather than throw the
                 // buffer away a second time.
@@ -3825,16 +3558,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 answered()
 
             case .file(let url):
-                readTextFile(url) { outcome in
+                app.readTextFile(url) { outcome in
                     switch outcome {
                     case .text(let file):
-                        let tab = DocTab(id: self.nextTabID, url: url)
+                        let tab = DocTab(id: self.app.freshTabID(), url: url)
                         tab.encoding = file.encoding
                         tab.encodingGuessed = file.guessed
                         tab.digest = DocTab.digest(of: file.text)
                         tab.base.rebase(to: file.fingerprint)
                         tab.authorship = Authorship.split(file.text)
-                        self.nextTabID += 1
                         sit(tab, seat, tab.authorship?.body ?? file.text)
                     case .notText:
                         // A file that has become unreadable since it was noted
@@ -3876,384 +3608,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         if url != nil { documentFound(target) }
         if let url = url {
             NSDocumentController.shared.noteNewRecentDocumentURL(url)
-            pushRecents()
+            app.pushRecents()
         }
         if target.id == activeID { syncWindowToTab() }
         pushTabs()
-        saveSession()
-    }
-
-    // ------------------------------------------------------------------
-    // Reading and writing text
-    //
-    // This used to end with String(decoding:as:UTF8.self), which never fails:
-    // it substitutes U+FFFD for every byte it cannot make sense of. Open a
-    // Latin-1 file, type one character, and the autosave a second later wrote
-    // the replacement characters back over the original. There is no undo for
-    // that on disk, and nothing anywhere said it had happened.
-    //
-    // Two things fix it, and it needs both. Decoding stops guessing and says
-    // which encoding it used; writing then uses that same encoding rather than
-    // always UTF-8. Reading Latin-1 and writing UTF-8 is what destroyed the
-    // file — reading Latin-1 and writing Latin-1 round-trips every byte.
-    //
-    // Latin-1 is last and always succeeds, because every byte is a valid
-    // Latin-1 character. That is a feature here: it means a file is never
-    // refused for being in some 8-bit encoding we did not think of, and
-    // whatever it was, saving gives its bytes back unchanged. It is recorded
-    // as a guess rather than a fact, and the status bar says so.
-    // ------------------------------------------------------------------
-
-    struct TextFile {
-        let text: String
-        let encoding: String.Encoding
-        /// True when nothing identified the encoding and Latin-1 was assumed.
-        let guessed: Bool
-        /// The bytes this text was decoded from, as a save of it will expect to
-        /// find them. See Coordinated.Base.
-        var fingerprint: Int? = nil
-
-        var label: String {
-            let name: String
-            switch encoding {
-            case .utf8:            name = "UTF-8"
-            case .utf16:           name = "UTF-16"
-            case .utf16LittleEndian: name = "UTF-16 LE"
-            case .utf16BigEndian:  name = "UTF-16 BE"
-            case .utf32:           name = "UTF-32"
-            case .isoLatin1:       name = "Latin-1"
-            case .macOSRoman:      name = "Mac OS Roman"
-            case .windowsCP1252:   name = "Windows-1252"
-            default:               name = "Encoding \(encoding.rawValue)"
-            }
-            return guessed ? name + " (assumed)" : name
-        }
-    }
-
-    /// A file that is not text at all. Opening one and letting autosave have
-    /// it is the same data loss by a different road, and a NUL byte outside a
-    /// UTF-16 or UTF-32 file is the cheapest reliable tell there is.
-    func looksBinary(_ data: Data) -> Bool {
-        if data.starts(with: [0xFE, 0xFF]) || data.starts(with: [0xFF, 0xFE]) { return false }
-        if data.starts(with: [0x00, 0x00, 0xFE, 0xFF]) { return false }
-        return data.prefix(8000).contains(0x00)
-    }
-
-    /// What a read of a document came back with. Three answers rather than the
-    /// two an optional can carry, and the third is the one this exists for: a
-    /// file that could not be read whole is not the same thing as a file with
-    /// nothing in it, and a caller handed `nil` for both would open an empty
-    /// tab over a document somebody is halfway through writing.
-    enum ReadOutcome {
-        /// The document, read whole.
-        case text(TextFile)
-        /// The read was clean and there is nothing here to open: no file at the
-        /// path, or a file that is not text this app may edit.
-        case notText
-        /// Something is writing the file right now and it could not be read
-        /// whole. Nothing is handed back, and the sentence is for a person.
-        case busy(String)
-    }
-
-    /// Read a document, and answer on main when it has been read.
-    ///
-    /// Coordinated, so a file being written by iCloud or Dropbox is read after
-    /// that write rather than during it, and asynchronous, because waiting for
-    /// that on the thread the writer is typing on is what froze the app for two
-    /// seconds a document. Every decode goes inside the one coordinated block:
-    /// two reads would be two chances to catch the file in different states.
-    ///
-    /// `presenter(for:)` reads the tab list, so this is main's to call.
-    func readTextFile(_ url: URL, then: @escaping (ReadOutcome) -> Void) {
-        Coordinated.read(url, presenter: presenter(for: url), { u in
-            self.decodeTextFile(u)
-        }, then: { file, error in
-            if let error = error { then(.busy(error.localizedDescription)); return }
-            guard let file = file else { then(.notText); return }
-            then(.text(file))
-        })
-    }
-
-    private func decodeTextFile(_ url: URL) -> TextFile? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        if looksBinary(data) { return nil }
-        // Of these bytes, in this read, so that what a save of the document
-        // later expects to find is exactly what the writer was shown.
-        let read = Coordinated.Base.fingerprint(data)
-
-        // UTF-8 first and strictly. String(data:encoding:) returns nil on a
-        // byte sequence that is not valid UTF-8, which is the check the old
-        // code was missing.
-        if let s = String(data: data, encoding: .utf8) {
-            return TextFile(text: s, encoding: .utf8, guessed: false, fingerprint: read)
-        }
-        // A byte-order mark is the one time a file states its own encoding.
-        for (bom, enc) in [([0xFF, 0xFE, 0x00, 0x00], String.Encoding.utf32LittleEndian),
-                           ([0x00, 0x00, 0xFE, 0xFF], .utf32BigEndian),
-                           ([0xFF, 0xFE], .utf16LittleEndian),
-                           ([0xFE, 0xFF], .utf16BigEndian)] {
-            if data.starts(with: bom.map { UInt8($0) }),
-               let s = String(data: data, encoding: enc) {
-                return TextFile(text: s, encoding: enc, guessed: false, fingerprint: read)
-            }
-        }
-        // Then whatever the system can tell us, which includes the encoding
-        // recorded in the file's extended attributes by other Mac editors.
-        var used = String.Encoding.utf8
-        if let s = try? String(contentsOf: url, usedEncoding: &used) {
-            return TextFile(text: s, encoding: used, guessed: false, fingerprint: read)
-        }
-        // Last, and never fails.
-        if let s = String(data: data, encoding: .isoLatin1) {
-            return TextFile(text: s, encoding: .isoLatin1, guessed: true, fingerprint: read)
-        }
-        return nil
-    }
-
-    /// The presenter registered for a path, if a tab holds it. Handed to the
-    /// coordinator so that our own reads and writes are not reported back to us
-    /// a moment later as somebody else's change.
-    func presenter(for url: URL) -> DocPresenter? {
-        let target = url.standardizedFileURL
-        return tabs.first { $0.url?.standardizedFileURL == target }?.presenter
-    }
-
-    /// What a write did, with nothing in it that belongs to the app. Kept apart
-    /// so the disk half can run on any thread and the state half always runs on
-    /// main, without either of them being written twice.
-    enum WriteOutcome {
-        /// Written. `promoted` when the file's own encoding could not hold the
-        /// text and UTF-8 was used instead.
-        case wrote(promoted: Bool)
-        case failed(String)
-        /// There was no document at the path to save into. Not a write that
-        /// failed — a document that is not where the app thought it was, which
-        /// wants a different answer and a different sentence, so it is kept
-        /// apart from `failed` rather than folded into it.
-        case vanished(String)
-        /// Something else wrote the file after this document last read or
-        /// saved it, and this save would have replaced that unseen, so nothing
-        /// was written. Not a failure either: the file is fine and so is the
-        /// text, and trying again a second later answers nothing. It wants a
-        /// person to say which version wins. See Coordinated.Base.
-        case conflict(String)
-        /// The text this save carried stopped being the document's before the
-        /// save reached the file — a reload, or an answer to the changed-on-disk
-        /// question, came in between. Nothing was written, and there is nothing
-        /// to report: whatever the document holds now is saved on its own.
-        case superseded
-    }
-
-    /// Every extended attribute the file at `src` carries, copied onto `dst`.
-    ///
-    /// Finder tags, Finder comments, the encoding some other Mac editor
-    /// recorded, a download's quarantine flag: all of that is extended
-    /// attributes, all of it is the writer's, and a freshly made file swapped
-    /// into place has none of it. com.apple.provenance is the one exception —
-    /// the kernel owns it and setxattr on it fails, and a loop that took that
-    /// for a real error would drop every attribute after it.
-    private static func carryXattrs(from src: String, to dst: String) {
-        let size = listxattr(src, nil, 0, 0)
-        guard size > 0 else { return }
-        var names = [CChar](repeating: 0, count: size)
-        guard listxattr(src, &names, size, 0) > 0 else { return }
-        for name in names.split(separator: 0).compactMap({ String(cString: Array($0) + [0]) }) {
-            if name == "com.apple.provenance" { continue }
-            let valueSize = getxattr(src, name, nil, 0, 0, 0)
-            guard valueSize >= 0 else { continue }
-            var value = [UInt8](repeating: 0, count: max(valueSize, 1))
-            if valueSize > 0 {
-                guard getxattr(src, name, &value, valueSize, 0, 0) >= 0 else { continue }
-            }
-            _ = setxattr(dst, name, value, valueSize, 0, 0)
-        }
-    }
-
-    /// Puts `data` where `url` is, keeping what the filesystem already knew
-    /// about the file that is there.
-    ///
-    /// `String.write(atomically: true)` writes a brand new file and swaps it
-    /// in. That is what makes it crash-safe, and it is also what made every
-    /// autosave quietly destroy the file's extended attributes and reset its
-    /// creation date — measured, against iA Writer, which preserves both.
-    /// Finder tags and Finder comments *are* extended attributes. None of it is
-    /// ours to throw away.
-    ///
-    /// So the swap is done by hand: stage the bytes beside the file, carry the
-    /// metadata across onto the staging file, and only then replace. Beside,
-    /// rather than in a temporary directory, so the replace is a rename on the
-    /// one volume; dot-prefixed and uniquely named, and it exists for the
-    /// length of the swap and no longer.
-    ///
-    /// The inode still changes and a hard link still breaks. That is simply
-    /// what an atomic replace is — iA Writer does the same — and the trade the
-    /// other way is a half-written document after a power cut.
-    ///
-    /// `lastLook` is asked once, after everything slow is done and immediately
-    /// before the swap, and nothing is replaced unless it says yes. It is where
-    /// a save checks the file is still the version its text was made from, and
-    /// it goes here rather than before the staging because that check is only
-    /// airtight against writers that coordinate. git, vim and cp do not, and
-    /// for them the gap between looking and swapping is a gap they can land
-    /// in. Staging first leaves that gap at one read, one hash and one rename.
-    /// Narrower is all it can be made; see writeToDisk for what is left.
-    ///
-    /// Returns whether the file was replaced.
-    private static func replaceContents(of url: URL, with data: Data,
-                                        lastLook: () -> Bool) throws -> Bool {
-        let fm = FileManager.default
-        // Nothing there yet: a Save As, or a file being created. No metadata to
-        // keep, and the ordinary atomic write is already the right answer.
-        guard let was = try? fm.attributesOfItem(atPath: url.path) else {
-            guard lastLook() else { return false }
-            try data.write(to: url, options: .atomic)
-            return true
-        }
-
-        let token = String(UInt32.random(in: 0 ... .max), radix: 16)
-        let staged = url.deletingLastPathComponent()
-            .appendingPathComponent(".\(url.lastPathComponent).minimark-\(token)")
-        do {
-            // Not atomically: this is a file nobody knows about yet, and an
-            // atomic write of it would only stage a staging file.
-            try data.write(to: staged)
-            carryXattrs(from: url.path, to: staged.path)
-            var keep: [FileAttributeKey: Any] = [:]
-            if let mode = was[.posixPermissions] { keep[.posixPermissions] = mode }
-            // When the document came into being is not a fact about this save.
-            if let born = was[.creationDate] { keep[.creationDate] = born }
-            if !keep.isEmpty { try? fm.setAttributes(keep, ofItemAtPath: staged.path) }
-            guard lastLook() else {
-                try? fm.removeItem(at: staged)
-                return false
-            }
-            // .usingNewMetadataOnly, because the metadata that matters is
-            // now on the staging file and that is the copy this option keeps.
-            // Neither option is right on its own: measured, this one leaves
-            // the permissions at 644 and the default rewrites them to 600.
-            // That is what the two lines above are for.
-            _ = try fm.replaceItemAt(url, withItemAt: staged, backupItemName: nil,
-                                     options: [.usingNewMetadataOnly])
-        } catch {
-            try? fm.removeItem(at: staged)
-            throw error
-        }
-        return true
-    }
-
-    /// The half that touches the disk. No app state is read or written here, so
-    /// it is safe anywhere; `applyWrite` does the rest, on main.
-    ///
-    /// Asynchronous, because coordination is: `done` is called on main once the
-    /// file has actually been written, which on a contended file is whenever
-    /// the other writer lets go. Nothing waits on a thread for it, and nothing
-    /// is written without the claim.
-    ///
-    /// `done` is told where the bytes went as well as how it went, because on a
-    /// contended file those are no longer the same question: a coordinated
-    /// rename while this write waits its turn carries it to the document's new
-    /// name, and the caller has a modification date to record against whichever
-    /// path it actually landed on.
-    ///
-    /// `intent` has no default on purpose. Whether a path with nothing at it is
-    /// a file waiting to be made or a document that has gone is the one thing
-    /// this cannot work out for itself, and a default would let a call site
-    /// answer it by not thinking about it.
-    ///
-    /// Nor has `expecting`, for the same reason: it is the ticket the save took
-    /// from its document along with the text, and a save of a document that is
-    /// already on disk replaces nothing unless the file is still the version
-    /// that text was made from — or one of this document's own saves since.
-    /// The check is made with the file held, after the new bytes are staged and
-    /// immediately before the swap, so no coordinating writer can land between
-    /// the look and the replace. A file that changed comes back as `conflict`
-    /// and is left exactly as it was; the caller decides who to ask. A save
-    /// that makes a file checks nothing — Save As has already asked about
-    /// anything in the way — but still moves the ticket's base on to what it
-    /// wrote, so the document's next save expects its own file.
-    ///
-    /// What is still open: a writer that does not coordinate — git, vim, cp —
-    /// can land in the gap between the last look and the rename, and is then
-    /// replaced unseen as it always was. The gap is one read, one hash and one
-    /// rename now rather than the length of a save, and it is not zero.
-    static func writeToDisk(_ text: String, to url: URL, encoding want: String.Encoding,
-                            intent: Coordinated.Intent,
-                            expecting ticket: Coordinated.Base.Ticket?,
-                            presenter: NSFilePresenter?,
-                            done: @escaping (WriteOutcome, URL) -> Void) {
-        // Which encoding wins is settled before anything touches the disk, so
-        // the two attempts cost one staged file rather than two. The file's own
-        // encoding first: if the writer has since typed something it cannot
-        // hold — an em dash into a Latin-1 file, an emoji into anything 8-bit —
-        // data(using:) returns nil rather than mangling, and the document is
-        // promoted to UTF-8 and stays that way. Promoting is safe in a way the
-        // reverse would not be: UTF-8 can hold everything the old encoding
-        // could.
-        var promoted = false
-        var payload = want == .utf8 ? nil : text.data(using: want)
-        if payload == nil {
-            payload = text.data(using: .utf8)
-            promoted = want != .utf8
-        }
-        guard let data = payload else {
-            done(.failed("The document could not be encoded."), url)
-            return
-        }
-
-        var outcome = WriteOutcome.failed("The file could not be written.")
-        // Where the bytes actually went. The same path unless the coordinator
-        // moved the claim while it was pending, and written before `then` runs
-        // for the same reason `outcome` is.
-        var landed = url
-        // One coordination for the whole attempt, not one per encoding. Taking
-        // it twice would let a sync client in between the two, and the second
-        // write would be racing the copy it had just uploaded.
-        Coordinated.write(url, intent: intent, presenter: presenter, { u in
-            landed = u
-            let payload = Coordinated.Base.fingerprint(data)
-            // Why the last look said no, when it did.
-            var refused: WriteOutcome?
-            do {
-                let swapped = try replaceContents(of: u, with: data) {
-                    guard intent == .update, let ticket = ticket else { return true }
-                    // Read whole, with the claim still held. A file that cannot
-                    // be read cannot be vouched for, and is not saved over.
-                    guard let now = try? Data(contentsOf: u) else {
-                        refused = FileManager.default.fileExists(atPath: u.path)
-                            ? .failed("“\(u.lastPathComponent)” could not be read to check that "
-                                      + "nothing else had changed it, so it was not saved over.")
-                            : .vanished(Coordinated.gone(u))
-                        return false
-                    }
-                    switch ticket.verdict(onDisk: Coordinated.Base.fingerprint(now), writing: payload) {
-                    case .replace:    return true
-                    case .already:    refused = .wrote(promoted: promoted)
-                    case .changed:    refused = .conflict(Coordinated.changed(u))
-                    case .superseded: refused = .superseded
-                    }
-                    return false
-                }
-                if swapped {
-                    ticket?.wrote(payload)
-                    outcome = .wrote(promoted: promoted)
-                } else if let refused = refused {
-                    outcome = refused
-                }
-            } catch {
-                outcome = .failed(error.localizedDescription)
-            }
-        }, then: { error in
-            // An error here means the file was never ours and nothing was
-            // written — the claim was cancelled, the coordinator refused, or
-            // there is no document at that path to save into. The last of those
-            // is not a bad write, it is a document that has gone somewhere, and
-            // the app answers it differently: it stops writing to that name
-            // rather than trying again a second later.
-            if let error = error {
-                done(Coordinated.isGone(error) ? .vanished(error.localizedDescription)
-                                               : .failed(error.localizedDescription), url)
-            } else { done(outcome, landed) }
-        })
+        app.saveSession()
     }
 
     /// Insurance against a save that has not come back.
@@ -4321,7 +3680,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                                 encoding: target?.encoding ?? .utf8,
                                 intent: intent,
                                 expecting: ticket,
-                                presenter: presenter(for: url)) { outcome, landed in
+                                presenter: app.presenter(for: url)) { outcome, landed in
             insurance?.cancel()
             if case .wrote = outcome { commit() }
             done(self.applyWrite(outcome, to: landed, wrote: onDisk, page: text,
@@ -4365,7 +3724,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         AppDelegate.writeToDisk(onDisk, to: url, encoding: tab.encoding,
                                 intent: .update,
                                 expecting: ticket,
-                                presenter: presenter(for: url)) { outcome, landed in
+                                presenter: app.presenter(for: url)) { outcome, landed in
             insurance.cancel()
             tab.saving = false
             // Re-checked on the way back, not on the way out, and against where
@@ -4398,11 +3757,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     /// stamp records the first, because that is what the file says; anything
     /// put somewhere safe keeps the second, because that is what goes back
     /// into a page.
-    private func applyWrite(_ outcome: WriteOutcome, to url: URL, wrote text: String,
+    private func applyWrite(_ outcome: AppDelegate.WriteOutcome, to url: URL, wrote text: String,
                             page: String, silent: Bool, tab target: DocTab?) -> Bool {
         switch outcome {
         case .wrote(let promoted):
-            stampFile(url, text: text)             // don't watch our own write back in
+            app.stampFile(url, text: text)             // don't watch our own write back in
             if let target = target {
                 // On disk, so nothing is standing between this document and its
                 // file any more, whatever stood there before.
@@ -4509,7 +3868,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             tab.saveTroubleShown = true
             js("if(window.App&&App.saveTrouble)App.saveTrouble(\(tab.id),\(jsLiteral(why)))")
         }
-        if asking { checkFileOnDisk() } else { lookSoon() }
+        if asking { app.checkFileOnDisk() } else { app.lookSoon() }
     }
 
     /// Nothing stands between the document and its file any more: the writer
@@ -4519,7 +3878,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     /// itself and the writer may well have stopped typing. What that save does
     /// is still up to the file: if it has changed yet again, it is refused and
     /// asked about again.
-    private func conflictCleared(_ tab: DocTab) {
+    fileprivate func conflictCleared(_ tab: DocTab) {
         tab.conflicted = false
         scheduleAutosave()
     }
@@ -4530,7 +3889,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     /// unsaved. Either way the insurance this tab kept is dropped rather than
     /// offered back at the next launch as though it had been lost, and "not
     /// saving" stops being true.
-    private func conflictDiscarded(_ tab: DocTab) {
+    fileprivate func conflictDiscarded(_ tab: DocTab) {
         let was = tab.conflicted
         tab.conflicted = false
         tab.forgetScratch()
@@ -4551,7 +3910,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     /// the file's, when the writer keeps theirs over it, and the writer's, when
     /// a tab closed with its save refused.
     @discardableResult
-    private func keepAside(_ text: String, authorship: Authorship?, named name: String,
+    fileprivate func keepAside(_ text: String, authorship: Authorship?, named name: String,
                            after neighbour: DocTab?) -> DocTab {
         let aside = makeTab(url: nil)
         aside.placeholder = name
@@ -4566,14 +3925,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
            + "\(jsLiteral(aside.dir)),\(aside.id))")
         pushTabs()
         window?.isDocumentEdited = true
-        suddenTermination()
-        saveSession()
+        app.suddenTermination()
+        app.saveSession()
         return aside
     }
 
     /// "notes (on disk).md" for a document called notes.md, and a number after
     /// it when an untitled tab already has that name.
-    private func asideName(_ tab: DocTab, _ note: String) -> String {
+    fileprivate func asideName(_ tab: DocTab, _ note: String) -> String {
         let ext = (tab.name as NSString).pathExtension
         let stem = (tab.name as NSString).deletingPathExtension
         let taken = Set(tabs.filter { $0.url == nil }.map { $0.placeholder })
@@ -4614,28 +3973,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     /// before you have typed a page into it.
     func pushEncoding() {
         guard let tab = activeTab else { return }
-        let label = tab.encoding == .utf8 ? "" : TextFile(text: "", encoding: tab.encoding,
-                                                          guessed: tab.encodingGuessed).label
+        let label = tab.encoding == .utf8 ? ""
+            : AppDelegate.TextFile(text: "", encoding: tab.encoding,
+                                   guessed: tab.encodingGuessed).label
         js("if(window.App&&App.setEncoding)App.setEncoding(\(jsLiteral(label)))")
-    }
-
-
-    /// Every tab holding this path, so the watcher does not report our own
-    /// write back to us as an outside change.
-    ///
-    /// The text as well as the mark, because the mark is no longer the only
-    /// thing a look compares. A save records what the file now says, so that a
-    /// later look at a file somebody rewrote with the same bytes — a `cp` of an
-    /// identical copy, a sync client putting back what we just sent it — is
-    /// recognised as saying nothing new rather than reloaded over the writer.
-    func stampFile(_ url: URL, text: String?) {
-        let now = fileMark(url)
-        let target = url.standardizedFileURL
-        for tab in tabs where tab.url?.standardizedFileURL == target {
-            tab.mark = now
-            tab.stirred = false
-            if let text = text { tab.digest = DocTab.digest(of: text) }
-        }
     }
 
     /// Open a file into a tab. Which tab depends on what is in front: an
@@ -4681,11 +4022,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             self.toast("Waiting for “\(url.lastPathComponent)” — something else is using it")
         }
 
-        readTextFile(url) { outcome in
+        app.readTextFile(url) { outcome in
             arrived = true
             self.opening.remove(pending)
 
-            let file: TextFile
+            let file: AppDelegate.TextFile
             switch outcome {
             case .text(let read):
                 file = read
@@ -4824,7 +4165,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 if ok {
                     target.dirty = false
                     self.window?.isDocumentEdited = self.tabs.contains { $0.dirty }
-                    self.suddenTermination()
+                    self.app.suddenTermination()
                     self.pushSaved(url, tab: target)
                 }
                 done(ok)
@@ -4864,7 +4205,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                     target.conflicted = false
                     self.setDocument(url, tab: target)
                     self.window?.isDocumentEdited = self.tabs.contains { $0.dirty }
-                    self.suddenTermination()
+                    self.app.suddenTermination()
                     self.pushSaved(url, tab: target)
                     done(true)
                 }
@@ -4936,7 +4277,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         // only fail, and the honest answer to "give this document a new name"
         // when it has no file is the panel that gives it one.
         guard let target = activeTab, let url = target.url, target.hasFile else {
-            menuSaveAs(nil)
+            saveAs { _ in }
             return
         }
 
@@ -4981,7 +4322,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     // ------------------------------------------------------------------
-    // Autosave + file watching
+    // Autosave
+    //
+    // Per window, because the text it writes comes out of this window's web
+    // view. What it does about a file that would not take the write is the
+    // app's — see File coordination there.
     // ------------------------------------------------------------------
 
     func scheduleAutosave() {
@@ -5020,7 +4365,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                     tab.scratchText = text
                     // Recorded once, when the buffer starts existing on disk,
                     // so a crash before the next tab change still finds it.
-                    if first { self.saveSession() }
+                    if first { self.app.saveSession() }
                 }
             }
         }
@@ -5075,185 +4420,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                     }
                     tab.dirty = false
                     self.window?.isDocumentEdited = self.tabs.contains { $0.dirty }
-                    self.suddenTermination()
+                    self.app.suddenTermination()
                     self.js("if(window.App)App.autoSaved(\(tab.id))")
                 }
-            }
-        }
-    }
-
-    /// Brings the registered presenters into line with the tabs, whatever just
-    /// happened to them. Reconciled rather than registered and unregistered at
-    /// each of the seven places a tab can change, because the cost of missing
-    /// one of those places is a presenter left registered on a file nobody has
-    /// open — and the coordination machinery will keep asking it to flush.
-    func syncPresenters() {
-        for tab in tabs {
-            let want = tab.url?.standardizedFileURL
-            let have = tab.presenter?.currentURL.standardizedFileURL
-            guard want != have else { continue }
-            if let old = tab.presenter {
-                NSFileCoordinator.removeFilePresenter(old)
-                tab.presenter = nil
-            }
-            if let url = tab.url {
-                let fresh = DocPresenter(url: url, owner: self)
-                NSFileCoordinator.addFilePresenter(fresh)
-                tab.presenter = fresh
-            }
-        }
-    }
-
-    /// The same reconciliation for the kernel watches, and a separate pass
-    /// rather than three more lines inside the one above, because the two are
-    /// answerable for different things: a presenter is process-wide state the
-    /// coordination machinery holds on to, and a watch is a file descriptor.
-    /// Both are wrong in the same way if a tab changes and nobody notices.
-    func syncWatches() {
-        for tab in tabs {
-            let want = tab.url?.standardizedFileURL
-            let have = tab.watch?.watching.standardizedFileURL
-            guard want != have else { continue }
-            tab.watch?.stop()
-            tab.watch = nil
-            guard let url = tab.url else { continue }
-            // Weak on both sides. The tab owns the watch, the watch's handler
-            // runs on its own queue long after any particular tab may have
-            // gone, and this closure is the one place the two could hold each
-            // other up.
-            tab.watch = DocWatch(url: url) { [weak self, weak tab] in
-                DispatchQueue.main.async {
-                    guard let self = self, let tab = tab,
-                          self.tabs.contains(where: { $0 === tab }) else { return }
-                    tab.stirred = true
-                    self.lookSoon()
-                }
-            }
-        }
-    }
-
-    /// A look at every open document, soon, however many changes asked for it.
-    ///
-    /// The poll comes round on its own timer; this is what the kernel watch
-    /// uses instead of calling straight into checkFileOnDisk. One event is one
-    /// write() somebody made: a `git checkout` of a worktree with the folder
-    /// open fires one per document — measured, 200 documents, 200 events — and
-    /// each of those turning into a pass over every tab would be forty thousand
-    /// passes, and a coordinated read per tab per pass. Measured through this:
-    /// 200 stirs become one look, and the next 200 become one more.
-    private func lookSoon() {
-        guard !watchLookPending else { return }
-        watchLookPending = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + kWatchSettle) { [weak self] in
-            guard let self = self else { return }
-            self.watchLookPending = false
-            self.checkFileOnDisk()
-        }
-    }
-
-    /// Everything one tab holds on the filesystem's behalf, let go of.
-    ///
-    /// Called where a tab leaves the strip, which is the one place the
-    /// reconcilers above cannot help: they walk `tabs`, so a tab that is no
-    /// longer in it is never visited and whatever it registered is never
-    /// dropped. That is not hypothetical — measured, addFilePresenter takes a
-    /// reference of its own and holds it, so until this existed every closed
-    /// tab left a presenter registered on a file nobody had open, being asked
-    /// to flush a document that was not there. A descriptor left open would be
-    /// the same bug wearing a different hat.
-    func releaseFileWatching(_ tab: DocTab) {
-        if let p = tab.presenter {
-            NSFileCoordinator.removeFilePresenter(p)
-            tab.presenter = nil
-        }
-        tab.watch?.stop()
-        tab.watch = nil
-    }
-
-    /// Every seat this app holds, given up. For quit: a presenter outliving the
-    /// app it reports to would be asked to flush a document that no longer
-    /// exists, and a descriptor outliving it is a descriptor.
-    func dropFileWatching() {
-        for tab in tabs { releaseFileWatching(tab) }
-    }
-
-    /// The file moved under an open tab — a Dropbox conflict rename, an iCloud
-    /// restore, a `git checkout` swapping it into place. Following it rather
-    /// than asking, because there is no question here that a person can answer
-    /// better than the filesystem already has: this is where the document went.
-    func documentMoved(_ presenter: DocPresenter, to newURL: URL) {
-        guard let tab = tabs.first(where: { $0.presenter === presenter }) else { return }
-        guard tab.url?.standardizedFileURL != newURL.standardizedFileURL else { return }
-        // Trashed, which arrives here rather than as a deletion — measured:
-        // trashItem is a move, and the only thing a presenter is told about it
-        // is where the file went. This is the one move not to follow. Doing so
-        // would leave the autosave writing into ~/.Trash every second, which is
-        // the writer's work kept in the one folder that exists to be emptied
-        // and a file they meant to delete refusing to stay deleted.
-        //
-        // The tab keeps the name it had rather than taking the Trash's, so a
-        // file put back where it came from is found by the poll and simply
-        // picked up again — no sheet, no Save As, the document carries on.
-        // pushTabs is what moves the presenter off the Trash and back onto that
-        // path to wait for it.
-        guard !isInTrash(newURL) else {
-            documentVanished(tab, why: Coordinated.gone(tab.url ?? newURL))
-            pushTabs()
-            return
-        }
-        tab.url = newURL
-        tab.mark = fileMark(newURL)
-        // Where it went is the answer to where it had gone. A bare `mv` reaches
-        // here about a second after the fact — measured — which is often after
-        // the write that was aimed at the old name has already been refused,
-        // and sometimes after the poll has given the document up. Either way it
-        // has a file again, so it saves again.
-        documentFound(tab)
-        NSDocumentController.shared.noteNewRecentDocumentURL(newURL)
-        pushRecents()
-        if tab.id == activeID { syncWindowToTab() }
-        pushTabs()
-        saveSession()
-    }
-
-    /// A coordinated delete, arriving from the presenter before the file goes
-    /// rather than from the poll a moment after it has. The answer is the same
-    /// one either way — there is a single place that decides what a document
-    /// with no file means, and this is not it.
-    ///
-    /// It is not a verdict, either, and taking it for one was wrong. Measured,
-    /// with the real presenter registered on a real file: a coordinated write
-    /// taken with `.forReplacing` — which is what every atomic save declares,
-    /// this app's own included — reaches a presenter as
-    /// accommodatePresentedItemDeletion, before the write, exactly as a real
-    /// deletion does. A plain coordinated write does not. So the callback that
-    /// means "somebody is deleting your document" also means "somebody is
-    /// saving your document from another editor", and nothing in it says which.
-    /// Believing it made every outside save mark the document gone: the status
-    /// bar said "not saving", the autosave went to the crash buffer, and ⌘S
-    /// asked where to put the file — until the next poll found the file exactly
-    /// where it had always been and quietly took it all back.
-    ///
-    /// What tells the two apart is the only thing that ever could: whether
-    /// there is a file there afterwards. So this looks instead of concluding,
-    /// with the same rule the poll uses and for the same reason — one look is
-    /// not enough, and the numbers behind that are in noteMissing. What it buys
-    /// over simply waiting for the poll is speed: a document that really was
-    /// deleted is called gone within half a second rather than within four.
-    ///
-    /// Nothing is at risk in that half second. The thing that stops a save
-    /// recreating a file somebody is deleting is not this flag, it is the
-    /// write's own intent — a save of a document with nothing at its path is
-    /// refused whenever it is issued.
-    func documentDeleted(_ presenter: DocPresenter) {
-        guard tabs.contains(where: { $0.presenter === presenter }) else { return }
-        // The first look is far enough past the callback for the deletion to
-        // have happened; the second is the gap goneForGood asks for, plus a
-        // little, so that two looks finding nothing really are a verdict.
-        for delay in [kFirstLookAfterDeletion,
-                      kFirstLookAfterDeletion + kAbsentBeforeGone + 0.05] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                self?.checkFileOnDisk()
             }
         }
     }
@@ -5280,7 +4449,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     /// The windows this app makes for itself are not counted at all: a save in
     /// flight is a temporary file waiting to be swapped in, and a rename is a
     /// document between two names, and neither is the file having gone.
-    private func noteMissing(_ tab: DocTab, at url: URL) {
+    fileprivate func noteMissing(_ tab: DocTab, at url: URL) {
         guard !tab.vanished else { return }
         guard !tab.saving, !tab.renaming else { return }
         tab.missingSince = tab.missingSince ?? Date()
@@ -5355,322 +4524,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         tab.lastSaveError = nil
         js("if(window.App&&App.saveTrouble)App.saveTrouble(\(tab.id),null)")
         scheduleAutosave()
-    }
-
-    /// Another process is about to read this file and has asked us to put what
-    /// is unsaved on disk first. Writing now is what keeps a conflict from
-    /// being made at all — the sync client uploads the sentence just typed
-    /// rather than the one before it — and it is the same write the autosave
-    /// would have done within the second anyway.
-    ///
-    /// `done` runs on every path, including the ones where there is nothing to
-    /// write, because a writer somewhere is waiting on it.
-    func flushForCoordination(_ url: URL, done: @escaping () -> Void) {
-        let target = url.standardizedFileURL
-        // `hasFile`, because a document whose file has gone has nothing to
-        // flush: the other process is about to read a path this app already
-        // knows is empty, and writing our text into it first would recreate the
-        // name rather than answer the question. `done` still runs, because
-        // somebody is waiting on it either way.
-        //
-        // A flush is a save, and gets the same check as every other: see
-        // writeToDisk. `conflicted` means the check has already said no and
-        // nobody has answered yet, so the other process reads what is on disk
-        // — which is what it would read after a refused flush anyway, without
-        // this app taking the file from everybody first to find that out.
-        guard let tab = tabs.first(where: { $0.url?.standardizedFileURL == target }),
-              tab.dirty, tab.hasFile, !tab.conflicted else { done(); return }
-        let ticket = tab.base.ticket()
-        fetchText(tab.id) { text in
-            guard let text = text, let live = tab.url,
-                  live.standardizedFileURL == target else { done(); return }
-            self.write(text, to: live, expecting: ticket, silent: true, tab: tab) { ok in
-                if ok {
-                    self.noteAutosave(tab, ok: true)
-                    tab.dirty = false
-                    self.window?.isDocumentEdited = self.tabs.contains { $0.dirty }
-                    self.suddenTermination()
-                    self.js("if(window.App)App.autoSaved(\(tab.id))")
-                } else {
-                    self.noteAutosave(tab, ok: false)
-                }
-                done()
-            }
-        }
-    }
-
-    /// The backstop, and still needed with presenters registered and a
-    /// descriptor on every open document. A presenter only hears from writers
-    /// that coordinate; git, vim, sed and rsync do not, and they are most of
-    /// what actually edits a markdown file behind an editor's back. What
-    /// changed is that the poll is no longer the only way an outside change is
-    /// noticed — a coordinated writer reaches checkFileOnDisk the moment it
-    /// finishes, and the kernel says so for a document rewritten in place,
-    /// rather than up to two seconds later and possibly mid-write.
-    ///
-    /// This does not shrink and must not. A vnode source needs a descriptor on
-    /// a real file, which network mounts and virtual filesystems do not always
-    /// give; a presenter needs the other process to be coordinating. The poll
-    /// needs nothing but stat, which is the point of it — and it is also what
-    /// re-arms a watch left on a file an atomic replace took away.
-    func startWatching() {
-        let timer = Timer(timeInterval: kWatchInterval, repeats: true) { [weak self] _ in
-            self?.checkFileOnDisk()
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        watchTimer = timer
-    }
-
-    /// Every open document, not only the one on screen — a tab you are not
-    /// looking at is exactly the one something else is most likely to change
-    /// underneath you.
-    ///
-    /// Only the one in front ever asks a question. A background document that
-    /// has been edited elsewhere and has nothing unsaved of its own is simply
-    /// brought up to date; one with unsaved changes is left alone until you go
-    /// back to it, which is when there is a person to ask.
-    ///
-    /// A file that does not answer at all is its own case now. It used to share
-    /// a line with a file that could not be statted this instant — `guard let
-    /// now = modificationDate(url) else { continue }` — which meant a document
-    /// that had been deleted was skipped over, silently, every two seconds, for
-    /// as long as the app was open. See noteMissing for how the two are told
-    /// apart and documentVanished for what happens once they are.
-    ///
-    /// And a file whose mark says nothing changed is not proof that nothing
-    /// did. `stirred` is the kernel saying this document was rewritten in place
-    /// since the last look, which is the one shape that can carry the old
-    /// timestamp; it is a reason to look, not a verdict, and what comes back is
-    /// compared against the tab's digest like anything else. See DocWatch.
-    func checkFileOnDisk() {
-        guard !reloadPromptUp else { return }
-        for tab in tabs {
-            guard let url = tab.url else { continue }
-            guard let now = fileMark(url) else { noteMissing(tab, at: url); continue }
-            // There is a file here, so whatever the last few looks thought is
-            // forgotten — and if the document had been given up for gone, this
-            // is where it stops being. Everything below runs as usual on the way
-            // back, so a file that returns with different bytes is reloaded, or
-            // asked about, exactly like any other outside change.
-            documentFound(tab)
-            // And a file here is also something to watch. An atomic replace —
-            // anyone's — leaves the old descriptor on a file the path no longer
-            // names, and the watch re-arms itself for that; this is the backstop
-            // for the re-arm that happened while the path was empty. Costs a
-            // branch on every look and a syscall only when it is actually
-            // disarmed.
-            tab.watch?.ensureArmed()
-            guard let known = tab.mark else { tab.mark = now; tab.stirred = false; continue }
-            guard now != known || tab.stirred else { continue }
-
-            // A read of this tab is already out. Reads are unbounded, so a file
-            // somebody is holding leaves one in the air for as long as they
-            // like, and a poll that issued another every two seconds would
-            // stack up a queue of them all landing at once — each carrying an
-            // older copy of the document than the last.
-            guard !tab.reading else { continue }
-
-            // Nothing unsaved here, so there is nothing to decide: take the
-            // new text, whether or not this is the document on screen.
-            guard tab.dirty else {
-                reread(tab, at: url, seenAt: now) { text, kept, read in
-                    // Unless somebody typed in it while the read was out. That
-                    // was impossible when this was synchronous and it is one
-                    // keystroke away now, and loading over it would throw away
-                    // a sentence nobody has a copy of. Left unhandled on
-                    // purpose: the next pass finds the tab dirty and asks.
-                    //
-                    // And the next save is what makes sure of that. A save of
-                    // the typing lands on a file this tab has not taken in yet,
-                    // and the base still says so, so the save is refused and
-                    // the question asked — rather than the save quietly
-                    // replacing what this read found and its stamp telling the
-                    // next pass there had been nothing to ask about.
-                    guard !tab.dirty else { return false }
-                    tab.authorship = kept
-                    tab.base.rebase(to: read)
-                    self.conflictDiscarded(tab)
-                    self.js("if(window.App)App.externalChange(\(jsLiteral(text)),\(tab.id))")
-                    return true
-                }
-                continue
-            }
-
-            // Unsaved changes on both sides. Only the document in front gets
-            // asked about, and the others keep their old modification date on
-            // purpose — dropping it here would mark the change as handled and
-            // the question would never be asked when you came back to the tab.
-            guard tab.id == activeID, window?.isVisible == true else { continue }
-
-            // Claimed before the read rather than after it, because the read is
-            // out for as long as the other writer wants and the poll comes
-            // round every two seconds. Without this the same change would ask
-            // twice — or the second sheet would arrive on top of the first.
-            reloadPromptUp = true
-            reread(tab, at: url, seenAt: now) { text, kept, read in
-                // The window and the front tab were both checked on the way
-                // out, and a read can be out for a while. Anything that has
-                // changed since means there is no longer a question to ask, or
-                // nobody in front of it to answer — so it goes unhandled and
-                // the poll comes back to it rather than being stamped away.
-                guard let window = self.window, window.isVisible,
-                      tab.id == self.activeID, tab.dirty else { return false }
-                let alert = NSAlert()
-                alert.messageText = "“\(url.lastPathComponent)” changed on disk"
-                alert.informativeText = "You have unsaved changes here. Reload the file, or keep what "
-                    + "is on screen and save it over the file? Either way the version you do not keep "
-                    + "opens in a tab of its own, so neither is lost."
-                alert.addButton(withTitle: "Reload")
-                alert.addButton(withTitle: "Keep Mine")
-                // Until this is answered the document's base stays where it
-                // was, so a save arriving while the sheet is up — the autosave
-                // of a keystroke typed just before it, a presenter's flush — is
-                // refused rather than deciding the question for the writer.
-                alert.beginSheetModal(for: window) { response in
-                    self.reloadPromptUp = false
-                    guard self.tabs.contains(where: { $0 === tab }) else { return }
-                    // Either answer says what the text on screen now answers
-                    // to: the version read here. A save still out from before
-                    // the answer is refused when it reaches the file, whichever
-                    // way the answer went. If the file has moved on again since
-                    // this read, the next save finds that and asks again, about
-                    // the version the writer has not seen.
-                    tab.base.rebase(to: read)
-                    guard response == .alertFirstButtonReturn else {
-                        // Keep Mine. The tab keeps the block that goes with
-                        // what is on screen, and its text goes over the file —
-                        // but not before the version it replaces has somewhere
-                        // to be, because that is somebody's work too and this
-                        // is the moment it would otherwise be gone for good.
-                        let aside = self.keepAside(text, authorship: kept,
-                                                   named: self.asideName(tab, "on disk"), after: tab)
-                        self.toast("The version from disk is in “\(aside.name)”")
-                        self.conflictCleared(tab)
-                        return
-                    }
-                    // Reload. The file's version wins the document — but the
-                    // page the writer had goes into a tab of its own first,
-                    // for the same reason the other button sets the file's
-                    // version aside: it is somebody's work, and this is the
-                    // moment it would otherwise be gone. Keep Mine already
-                    // kept both, and a tab closed mid-save already keeps the
-                    // writing it could not save; Reload was the one way left
-                    // to destroy the page somebody had just typed, which is
-                    // the one loss this file says is not recoverable.
-                    //
-                    // From the insurance rather than the page: the refusal put
-                    // it there, so there is nothing to ask the web layer for,
-                    // and nothing to get wrong while the sheet comes down.
-                    if let mine = tab.scratchText, !mine.isEmpty, mine != text {
-                        let aside = self.keepAside(mine, authorship: tab.authorship,
-                                                   named: self.asideName(tab, "yours"), after: tab)
-                        self.toast("Your version is in “\(aside.name)”")
-                    }
-                    tab.dirty = false
-                    self.window?.isDocumentEdited = self.tabs.contains { $0.dirty }
-                    self.suddenTermination()
-                    tab.authorship = kept
-                    self.conflictDiscarded(tab)
-                    self.js("if(window.App)App.externalChange(\(jsLiteral(text)),\(tab.id))")
-                }
-                return true
-            } otherwise: {
-                // Nothing to ask about after all: the file would not settle, it
-                // stopped being text, or the question stopped being one. The
-                // claim has to go back or the poll is silenced for good.
-                self.reloadPromptUp = false
-            }
-            return                              // one question at a time
-        }
-    }
-
-    /// Read a document that has changed underneath its tab, and hand the text
-    /// to whatever the caller does about it.
-    ///
-    /// Everything that has to be true on the way back lives here rather than in
-    /// each caller, because the way back is now a different moment from the way
-    /// out and every one of these has bitten something at some point. The tab
-    /// may have been closed. It may have been renamed, or moved, or given up
-    /// for gone, in which case this text belongs to a path it has left. It may
-    /// have been typed in, which turns a quiet reload into a question — so that
-    /// judgement is the caller's and is made when the text arrives, not when it
-    /// was asked for.
-    ///
-    /// `use` says whether it did something with the text, and only then is the
-    /// change written off as handled. A change the app looked at and decided
-    /// not to act on this time is a change it still has to act on next time,
-    /// and recording the date would lose the question for good.
-    ///
-    /// `seenAt` is the mark that triggered the read, and it is what gets
-    /// recorded rather than the mark afterwards. If the file has moved on again
-    /// since, the poll should come back for it, and stamping the newer mark
-    /// would be saying this text is the newer file's.
-    ///
-    /// A read that could not be settled records nothing at all. That is the
-    /// point of the whole exercise: the file is left looking changed, so the
-    /// next poll asks again, rather than half of it being taken for all of it.
-    ///
-    /// And a file that was written but says the same thing never reaches `use`
-    /// at all. That is not an optimisation, it is the difference between the
-    /// kernel watch being an improvement and being a nuisance: the watch fires
-    /// on a rewrite, not on a change, and a great deal of what rewrites a file
-    /// writes the same bytes back. Reaching `use` with them would put "Reloaded
-    /// from disk" in front of somebody typing, throw away a background tab's
-    /// undo stack, or ask whether to discard unsaved work — over a document
-    /// that says exactly what it said before. The look still counts as
-    /// finished, because it was: this is what the file says and the tab now
-    /// knows it.
-    ///
-    /// `use` is also handed the fingerprint of the bytes that were read, and
-    /// moving the document's base to it is the caller's business rather than
-    /// this function's: a reload moves it at once, and the question moves it
-    /// only when it has been answered.
-    private func reread(_ tab: DocTab, at url: URL, seenAt: FileMark,
-                        _ use: @escaping (String, Authorship?, Int?) -> Bool,
-                        otherwise: (() -> Void)? = nil) {
-        tab.reading = true
-        // Taken as the read goes out, so that a save of ours landing while it
-        // is out is not undone by the older news this brings back. See
-        // Base.agree.
-        let moved = tab.base.moved
-        readTextFile(url) { outcome in
-            tab.reading = false
-            guard case .text(let file) = outcome,
-                  self.tabs.contains(where: { $0 === tab }),
-                  tab.url?.standardizedFileURL == url.standardizedFileURL,
-                  !tab.vanished else { otherwise?(); return }
-            let digest = DocTab.digest(of: file.text)
-            guard tab.digest != digest else {
-                // The encoding is taken even so. Rewriting a file into another
-                // encoding leaves the text identical and the bytes different,
-                // and a save that did not know would quietly put it back the
-                // way it was.
-                tab.encoding = file.encoding
-                tab.encodingGuessed = file.guessed
-                tab.mark = seenAt
-                tab.stirred = false
-                // And so are the bytes, for the same reason from the other
-                // side: a save expecting the old ones would take this rewrite
-                // for somebody else's work and refuse, every time, with nothing
-                // to ask anybody about.
-                tab.base.agree(with: file.fingerprint, unlessMovedSince: moved)
-                // Which is also the answer to a save that was refused over
-                // this: there was nothing to choose between after all.
-                if tab.conflicted { self.conflictCleared(tab) }
-                otherwise?()
-                return
-            }
-            // Without iA Writer's authorship block, and with it separately:
-            // which block the tab keeps depends on whether the page takes this
-            // text, and only the caller knows that, sometimes only after asking.
-            let kept = Authorship.split(file.text)
-            guard use(kept?.body ?? file.text, kept, file.fingerprint) else { otherwise?(); return }
-            tab.encoding = file.encoding
-            tab.encodingGuessed = file.guessed
-            tab.mark = seenAt
-            tab.stirred = false
-            tab.digest = digest
-        }
     }
 
     // ------------------------------------------------------------------
@@ -5975,69 +4828,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     // ------------------------------------------------------------------
 
     /// The `menu` bridge message and the File menu items run the same code.
+    /// The bridge's copy arrives from a particular page, so it acts on that
+    /// page's window rather than on whichever one is in front.
     func runMenuAction(_ name: String) {
         switch name {
-        case "new":        menuNew(nil)
-        case "newTab":     menuNew(nil)
-        case "closeTab":   menuCloseTab(nil)
-        case "open":       menuOpen(nil)
-        case "save":       menuSave(nil)
-        case "saveAs":     menuSaveAs(nil)
-        case "templates":  menuTemplates(nil)
-        case "exportHTML": menuExportHTML(nil)
-        case "exportPDF":  menuExportPDF(nil)
-        case "print":      menuPrint(nil)
-        case "pageSetup":  menuPageSetup(nil)
-        case "reveal":     menuReveal(nil)
+        case "new":        newDocument()
+        case "newTab":     newDocument()
+        case "closeTab":   closeActiveTab()
+        case "open":       openPanel()
+        case "save":       saveDocument { _ in }
+        case "saveAs":     saveAs { _ in }
+        case "templates":  app.menuTemplates(nil)
+        case "exportHTML": exportHTML()
+        case "exportPDF":  exportPDF()
+        case "print":      printDocument()
+        case "pageSetup":  pageSetup()
+        case "reveal":     revealInFinder()
         case "fullscreen": window?.toggleFullScreen(nil)
         case "zoom":       window?.performZoom(nil)
         default:           break
         }
     }
 
-    @objc func webCommand(_ sender: NSMenuItem) {
-        guard let name = sender.representedObject as? String else { return }
-        command(name)
-    }
-
-    /// The formatting run at the bottom of the right-click menu. The same
-    /// actions the selection bubble offers, because a writer who has just
-    /// right-clicked a word is asking the same question the bubble answers,
-    /// and having to go and find the bubble instead is the friction.
-    func formattingMenuItems() -> [NSMenuItem] {
-        let actions: [(String, String, String)] = [
-            ("Bold",          "bold",   "b"),
-            ("Italic",        "italic", "i"),
-            ("Strikethrough", "strike", ""),
-            ("Inline Code",   "code",   "e"),
-            ("Link…",         "link",   "")
-        ]
-        return actions.map { title, name, key in
-            let item = NSMenuItem(title: title, action: #selector(webCommand(_:)), keyEquivalent: key)
-            // Shown, not armed. The real shortcut is already on the Format
-            // menu; a second live copy inside a context menu would fire twice.
-            item.keyEquivalentModifierMask = key.isEmpty ? [] : [.command]
-            item.isEnabled = true
-            item.target = self
-            item.representedObject = name
-            return item
-        }
-    }
-
     /// New and New Tab are the same act in a one-window app: a blank document
     /// alongside the others rather than over the top of one. Nothing is
     /// discarded, so nothing has to be asked about first.
-    @objc func menuNew(_ sender: Any?) {
+    func newDocument() {
         newTab()
         command("showTabs")
     }
 
-    @objc func menuCloseTab(_ sender: Any?) {
+    func closeActiveTab() {
         guard let id = activeTab?.id else { window?.performClose(nil); return }
         closeTab(id)
     }
 
-    @objc func menuOpen(_ sender: Any?) {
+    func openPanel() {
         guard let window = window else { return }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = docContentTypes()
@@ -6051,95 +4877,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
     }
 
-    // ------------------------------------------------------------------
-    // Open Recent
-    //
-    // The list itself is NSDocumentController's, so it is deduped, capped and
-    // persisted by AppKit, and the same entries turn up in the Dock menu and
-    // the Apple menu's Recent Items for free. This app has no NSDocument
-    // subclasses, but noteNewRecentDocumentURL does not require one.
-    // ------------------------------------------------------------------
-
-    /// Recent documents that are still on disk. A menu that offers a file it
-    /// cannot open is worse than a shorter menu.
-    func recentDocuments() -> [URL] {
-        // Every file already in a tab is dropped, not only the one in front:
-        // offering to open something that is one click away in the strip is
-        // noise, and taking it would only bring that tab forward anyway.
-        let open = Set(tabs.compactMap { $0.url?.standardizedFileURL })
-        return NSDocumentController.shared.recentDocumentURLs.filter { url in
-            !open.contains(url.standardizedFileURL)
-                && FileManager.default.isReadableFile(atPath: url.path)
-        }
-    }
-
-    /// Two files called Notes.md need telling apart, so a name that appears
-    /// more than once carries its enclosing folder.
-    func recentTitles(_ urls: [URL]) -> [String] {
-        var seen: [String: Int] = [:]
-        for url in urls { seen[url.lastPathComponent, default: 0] += 1 }
-        return urls.map { url in
-            let name = url.lastPathComponent
-            guard seen[name, default: 0] > 1 else { return name }
-            let folder = url.deletingLastPathComponent().lastPathComponent
-            return folder.isEmpty ? name : "\(name) — \(folder)"
-        }
-    }
-
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        guard menu === recentMenu else { return }
-        menu.removeAllItems()
-        let urls = recentDocuments()
-        if urls.isEmpty {
-            // a nil action is all it takes: AppKit greys it out for us
-            menu.addItem(NSMenuItem(title: "No Recent Documents", action: nil, keyEquivalent: ""))
-            return
-        }
-        let titles = recentTitles(urls)
-        for (i, url) in urls.enumerated() {
-            let item = NSMenuItem(title: titles[i], action: #selector(openRecent(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = url
-            item.toolTip = url.path
-            let icon = NSWorkspace.shared.icon(forFile: url.path)
-            icon.size = NSSize(width: 16, height: 16)
-            item.image = icon
-            menu.addItem(item)
-        }
-        menu.addItem(.separator())
-        let clear = NSMenuItem(title: "Clear Menu", action: #selector(clearRecent(_:)), keyEquivalent: "")
-        clear.target = self
-        menu.addItem(clear)
-    }
-
-    @objc func openRecent(_ sender: NSMenuItem) {
-        guard let url = sender.representedObject as? URL else { return }
-        openRecentDocument(url)
-    }
-
-    func openRecentDocument(_ url: URL) {
-        // Both the menu and the palette are built from readable files only, so
-        // this is a race guard: the file went while the list was on screen.
-        guard FileManager.default.isReadableFile(atPath: url.path) else {
-            pushRecents()
-            presentError("Could not open “\(url.lastPathComponent)”",
-                         "The file has been moved, renamed or deleted.")
-            return
-        }
-        openDocument(at: url)
-    }
-
-    @objc func clearRecent(_ sender: Any?) {
-        NSDocumentController.shared.clearRecentDocuments(sender)
-        pushRecents()
-    }
-
     /// The palette is where this writer actually lives, so the same list goes
     /// over the bridge and can be typed at rather than pointed at.
     func pushRecents() {
         guard webReady else { return }
-        let urls = recentDocuments()
-        let titles = recentTitles(urls)
+        let urls = app.recentDocuments()
+        let titles = app.recentTitles(urls)
         let rows: [[String: String]] = urls.enumerated().map { i, url in
             ["name": titles[i], "path": url.path]
         }
@@ -6148,16 +4891,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         js("if(window.App&&App.setRecents)App.setRecents(\(json))")
     }
 
-    @objc func menuSave(_ sender: Any?) {
-        saveDocument { _ in }
-    }
-
-    @objc func menuSaveAs(_ sender: Any?) {
-        saveAs { _ in }
-    }
-
-    @objc func menuRename(_ sender: Any?) {
-        guard let url = docURL else { menuSaveAs(sender); return }
+    func renamePrompt() {
+        guard let url = docURL else { saveAs { _ in }; return }
 
         let alert = NSAlert()
         alert.messageText = "Rename document"
@@ -6174,7 +4909,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
     }
 
-    @objc func menuExportHTML(_ sender: Any?) {
+    func exportHTML() {
         fetchHTML { body in
             guard let body = body else {
                 self.presentError("Could not export",
@@ -6361,69 +5096,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
     }
 
-    /// Four libraries do work in here that this app does not do itself, and
-    /// three of them are the reason it can render anything at all. Naming them
-    /// is a licence condition for all four, and it belongs somewhere a person
-    /// can find it rather than only in a file in the repository.
-    ///
-    /// Versions are the ones vendored in Resources/vendor, read off their own
-    /// banners rather than remembered. Turndown ships without one, so it is
-    /// listed without a version rather than with a guessed one.
-    @objc func menuAcknowledgements(_ sender: Any?) {
-        let alert = NSAlert()
-        alert.messageText = "Acknowledgements"
-        alert.informativeText = """
-            minimark is built on work other people gave away.
-
-            marked 12.0.2 — MIT
-            Christopher Jeffrey and contributors
-            github.com/markedjs/marked
-
-            Turndown — MIT
-            Dom Christie
-            github.com/mixmark-io/turndown
-
-            highlight.js 11.11.1 — BSD 3-Clause
-            Ivan Sagalaev and contributors
-            github.com/highlightjs/highlight.js
-
-            KaTeX 0.16.47 — MIT
-            Khan Academy and contributors
-            github.com/KaTeX/KaTeX
-
-            The full licence text for each ships in NOTICES beside the app's             source. Their fonts and stylesheets are included unmodified.
-            """
-        alert.addButton(withTitle: "OK")
-        if let w = window, w.isVisible {
-            alert.beginSheetModal(for: w, completionHandler: nil)
-        } else {
-            alert.runModal()
-        }
-    }
-
-    /// Opens ~/Library/Application Support/minimark/ in Finder, writing the
-    /// two starter files first if they are not there. Both are inert as
-    /// shipped — the CSS is entirely inside a comment and the template is the
-    /// built-in page — so opening the folder cannot change how the app looks
-    /// until somebody decides it should.
-    @objc func menuTemplates(_ sender: Any?) {
-        Templates.writeStartersIfMissing()
-        guard let dir = Templates.dir else {
-            presentError("Could not open the templates folder",
-                         "minimark could not reach its Application Support folder.")
-            return
-        }
-        NSWorkspace.shared.open(dir)
-    }
-
     /// Edits the shared print info directly, so paper size and margins stick
     /// for the next print rather than being thrown away with a copy.
-    @objc func menuPageSetup(_ sender: Any?) {
+    func pageSetup() {
         NSPageLayout().beginSheet(with: NSPrintInfo.shared, modalFor: window,
                                   delegate: nil, didEnd: nil, contextInfo: nil)
     }
 
-    @objc func menuPrint(_ sender: Any?) {
+    func printDocument() {
         prepareToPrint { [weak self] in
             guard let self = self, let op = self.printOperation(self.documentPrintInfo()) else { return }
             op.showsPrintPanel = true
@@ -6432,7 +5112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
     }
 
-    @objc func menuExportPDF(_ sender: Any?) {
+    func exportPDF() {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
         let base = docURL?.deletingPathExtension().lastPathComponent ?? "Untitled"
@@ -6461,35 +5141,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         toast(success ? "Exported as PDF" : "Could not export PDF")
     }
 
-    @objc func menuReveal(_ sender: Any?) {
+    func revealInFinder() {
         guard let url = docURL else { toast("Save the document first"); return }
         NSWorkspace.shared.activateFileViewerSelecting([url])
-    }
-
-    @objc func menuInsertImageItem(_ sender: Any?) {
-        menuInsertImage()
-    }
-
-    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        // The tab items are the one place the menu has state to show as well
-        // as to enable: "Keep Tabs Showing" is a toggle and reads its own pref.
-        if let name = menuItem.representedObject as? String {
-            switch name {
-            case "nextTab", "prevTab":
-                return tabs.count > 1
-            case "toggleTabs":
-                menuItem.state = UserDefaults.standard.string(forKey: "tabsPin") == "1" ? .on : .off
-                return true
-            default:
-                return true
-            }
-        }
-        switch menuItem.action {
-        case #selector(menuReveal(_:)), #selector(menuRename(_:)):
-            return docURL != nil
-        default:
-            return true
-        }
     }
 
     /// The stylesheet the exported page carries: the built-in one, then the
@@ -6546,6 +5200,1543 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 }
 
+// ============================================================================
+// The app
+// ============================================================================
+
+final class AppDelegate: NSObject, NSApplicationDelegate,
+                         NSMenuItemValidation, NSMenuDelegate {
+
+    /// Every open window. Exactly one today; the order is the order they were
+    /// made, which is what the session writes out.
+    var editors: [Editor] = []
+
+    /// The window a menu command, a palette entry or a recent document means:
+    /// the one in front. There is only one to be in front today, and the
+    /// fallback is what keeps that true before the window has become key.
+    var front: Editor? { editors.first { $0.window?.isKeyWindow == true } ?? editors.first }
+
+    /// Every open document in the app, whichever window it is in. The
+    /// coordination is answerable for all of them at once: one presenter and
+    /// one watch per file, one poll that looks at every one of them, and a
+    /// save that stamps every tab holding the path it wrote.
+    var allTabs: [DocTab] { editors.flatMap { $0.tabs } }
+
+    /// The same list with the window each document is in. What a pass over all
+    /// of them needs: the tab says what the file did, and the window is where
+    /// anything said about it goes.
+    var allTabsAndWindows: [(Editor, DocTab)] {
+        editors.flatMap { editor in editor.tabs.map { (editor, $0) } }
+    }
+
+    /// Which window a document is in. The presenter callbacks and the poll
+    /// arrive with a tab and nothing else, and what they do about it — a
+    /// message to a page, an autosave, a sheet — belongs to the window the tab
+    /// is in.
+    func editor(of tab: DocTab) -> Editor? {
+        editors.first { $0.tabs.contains { $0 === tab } }
+    }
+
+    /// A tab id nobody else in this process has. Per-app rather than
+    /// per-window, because the session, the coordination and every lookup that
+    /// starts from a tab rather than from a window would otherwise have two
+    /// tabs with the same number to choose between.
+    private var nextTabID = 1
+    func freshTabID() -> Int {
+        let id = nextTabID
+        nextTabID += 1
+        return id
+    }
+
+    /// One more window, with nothing in it yet. Called once, at launch.
+    @discardableResult
+    func newWindow() -> Editor {
+        let editor = Editor(app: self)
+        editors.append(editor)
+        editor.buildWindow()
+        editor.loadWebLayer()
+        return editor
+    }
+
+    /// The user stylesheet as the page last saw it. Kept so that re-reading
+    /// the file on every activation is free when nothing has changed, which
+    /// is nearly always: without it, every switch back to the app would push
+    /// a <style> replacement and make the document flash.
+    var lastUserCSS: String? = nil
+
+    /// Whether sudden termination is currently disabled by us. See suddenTermination().
+    private var suddenBlocked = false
+
+    var recentMenu: NSMenu!
+
+    /// Documents a launch was asked to open, waiting for somewhere to put
+    /// them. The app's rather than a window's on purpose: open-with can arrive
+    /// before there is a window at all, and a file double-clicked in Finder
+    /// must not be dropped because the message beat the first frame.
+    var pendingOpen: URL?
+    var pendingExtra: [URL] = []
+
+    var watchTimer: Timer?
+
+    /// A look asked for by a kernel watch and not yet taken. See lookSoon.
+    var watchLookPending = false
+    /// Whether the changed-on-disk question is on screen. One at a time in the
+    /// whole app: the poll walks every window's documents and stops at the
+    /// first one worth asking about, so a second sheet cannot arrive on top of
+    /// the first, in this window or another.
+    var reloadPromptUp = false
+    var terminating = false
+    var terminateReplied = false
+
+    let history = HistoryStore()
+
+    // ------------------------------------------------------------------
+    // Launch
+    // ------------------------------------------------------------------
+
+    /// Coming back to the app re-reads the user stylesheet. That is the whole
+    /// edit loop for it: change user.css in whatever you edit CSS in, switch
+    /// back, see it. pushUserCSS compares against what the file last said, so
+    /// an activation that changed nothing costs one small file read and sends
+    /// no message at all.
+    func applicationDidBecomeActive(_ note: Notification) {
+        pushUserCSS()
+    }
+
+    func applicationDidFinishLaunching(_ note: Notification) {
+        NSApp.setActivationPolicy(.regular)
+        buildMenu()
+        newWindow()
+        startWatching()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    /// Open-with and drag-onto-icon. May arrive before the web layer is ready.
+    func application(_ sender: NSApplication, openFiles filenames: [String]) {
+        // All of them now, each into its own tab. Selecting six files in Finder
+        // and pressing Return used to open one and silently drop five.
+        let urls = filenames.map { URL(fileURLWithPath: $0) }
+        if let editor = front, editor.webReady {
+            editor.openDocuments(urls)
+            if !urls.isEmpty { editor.command("showTabs") }
+        } else if let first = urls.first {
+            pendingOpen = first
+            // Anything past the first has to wait for the web layer, which is
+            // moments away. handleReady takes pendingOpen and this takes the
+            // rest, in order, once there is somewhere to put them.
+            pendingExtra.append(contentsOf: urls.dropFirst())
+        }
+        sender.reply(toOpenOrPrint: .success)
+    }
+
+    func applicationDidResignActive(_ note: Notification) {
+        for editor in editors where editor.tabs.contains(where: { $0.dirty && $0.url != nil }) {
+            editor.runAutosave()
+        }
+        // Switching away is the cheapest moment there is to bank history:
+        // nobody is typing, and the write is off the main thread anyway.
+        commitHistory()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // A second ⌘Q while the first is still waiting would run the whole path
+        // again and reply twice, which is undefined and in practice fatal. The
+        // first attempt owns the reply.
+        //
+        // .terminateCancel rather than .terminateLater: the discard sheet below
+        // is window-modal, so the menu bar stays live and a second ⌘Q really can
+        // arrive. Answering it with .terminateLater would leave two waits
+        // outstanding against the one reply this attempt will make, and a
+        // Cancel would then wedge the app. Cancel unwinds the second attempt
+        // immediately — which is also the honest answer, since it is being
+        // ignored.
+        guard !terminating else { return .terminateCancel }
+        terminating = true
+        for editor in editors { editor.autosaveWork?.cancel() }
+
+        // No web layer to ask: nothing can be pending, so take the fast path
+        // rather than waiting on a callback that will never arrive. The hop
+        // through the run loop is so .terminateLater is returned before
+        // finishTerminate can reply to it.
+        guard editors.contains(where: { $0.webReady }) else {
+            history.flush()
+            if !allTabs.contains(where: { $0.dirty }) { terminating = false; return .terminateNow }
+            DispatchQueue.main.async { self.finishTerminate() }
+            return .terminateLater
+        }
+
+        // History is settled first and unconditionally. It can hold unpersisted
+        // snapshots even when the document is clean — autosave clears docDirty
+        // within a second, while the history write deliberately waits for a
+        // longer lull — so the old `guard docDirty` would have quietly dropped
+        // the last few minutes of it on every tidy quit. App.histCommit pins the
+        // present and answers null when there is genuinely nothing new, so a
+        // clean quit still costs only the round trip.
+        //
+        // The watchdog is because that round trip goes through the WebContent
+        // process. If it is killed mid-quit the completion never fires, and
+        // without this the app would sit in .terminateLater forever with no
+        // window and no way out but Force Quit.
+        // Every window is asked, because the store is the app's and each page
+        // holds its own half of it. The quit goes on when the last of them has
+        // answered, or when the watchdog gives up on whichever has not.
+        var outstanding = editors.filter { $0.webReady }.count
+        var answered = false
+        let proceed: () -> Void = {
+            guard !answered else { return }
+            answered = true
+            self.history.flush()
+            self.finishTerminate()
+        }
+        for editor in editors where editor.webReady {
+            editor.fetchHistory { json in
+                if let json = json, !json.isEmpty { self.history.write(json) }
+                outstanding -= 1
+                if outstanding <= 0 { proceed() }
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + kQuitTimeout) { proceed() }
+        return .terminateLater
+    }
+
+    /// Exactly one reply per terminate attempt. A cancelled attempt clears both
+    /// flags so a later ⌘Q can try again; an accepted one leaves them set,
+    /// because the process is on its way out.
+    private func replyToTerminate(_ ok: Bool) {
+        guard terminating, !terminateReplied else { return }
+        terminateReplied = true
+        if !ok { terminating = false; terminateReplied = false }
+        // Last thing before going, and only on the path that is actually
+        // going. A presenter left registered while the app tears down would be
+        // asked to flush documents whose tabs are already gone.
+        if ok { dropFileWatching() }
+        NSApp.reply(toApplicationShouldTerminate: ok)
+    }
+
+    private func finishTerminate() {
+        let dirty = allTabs.filter { $0.dirty }
+        guard !dirty.isEmpty else {
+            replyToTerminate(true)
+            return
+        }
+
+        // Anything with a file is simply written, the same as the autosave a
+        // second later would have. A document that has never been saved has
+        // something left to decide, and so does one whose file has gone —
+        // writing that one silently would put back a name somebody took away,
+        // on the way out, with nobody looking. Both get asked about.
+        let onDisk = dirty.filter { $0.hasFile }
+        let untitled = dirty.filter { !$0.hasFile }
+
+        let group = DispatchGroup()
+        var failed: [String] = []
+        // The ones that were not written because something else had changed
+        // the file, which is a different sentence from a folder that has gone
+        // away and a different thing to do about it.
+        var changed = 0
+
+        for tab in onDisk {
+            guard let url = tab.url else { continue }
+            group.enter()
+            var settled = false
+            let finish: (Bool) -> Void = { wrote in
+                if settled { return }
+                settled = true
+                if !wrote {
+                    failed.append(url.lastPathComponent)
+                    if tab.conflicted { changed += 1 }
+                }
+                group.leave()
+            }
+            // If the web layer cannot produce the text, leave the file as it
+            // is rather than replacing it with nothing — and say so, rather
+            // than quitting quietly over the top of the loss. A document whose
+            // file changed under it is tried as well rather than skipped: the
+            // check inside the write is the one that knows, and if it still
+            // says no, the quit stops and the question is asked.
+            guard let editor = editor(of: tab) else { finish(false); continue }
+            let ticket = tab.base.ticket()
+            editor.fetchText(tab.id) { text in
+                guard let text = text else { finish(false); return }
+                editor.write(text, to: url, expecting: ticket, silent: true) { wrote in finish(wrote) }
+            }
+            // Same watchdog reasoning as the history fetch: this round trip
+            // goes through the WebContent process, and if that is killed
+            // mid-quit nothing else would ever reply.
+            DispatchQueue.main.asyncAfter(deadline: .now() + kQuitTimeout) { finish(false) }
+        }
+
+        group.notify(queue: .main) {
+            // Silent writes above, one honest alert here. Quitting over the top
+            // of a file that could not be written is the one outcome worth
+            // interrupting a quit for.
+            if !failed.isEmpty {
+                let alert = NSAlert()
+                alert.messageText = failed.count == 1
+                    ? "Could not save “\(failed[0])”"
+                    : "Could not save \(failed.count) documents"
+                alert.informativeText = changed == failed.count
+                    ? "Something else changed \(changed == 1 ? "it" : "them") on disk since "
+                      + "\(changed == 1 ? "it was" : "they were") last saved here, so minimark has "
+                      + "not saved over that, and has stopped quitting so nothing is lost. "
+                      + "Choose which version to keep, then quit again."
+                    : "minimark has stopped quitting so the changes are not lost. "
+                      + "Check the folder is still available, then try again."
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+                self.replyToTerminate(false)
+                return
+            }
+
+            guard !untitled.isEmpty else { self.replyToTerminate(true); return }
+
+            // Nowhere on disk to go and something in them: ask, one at a time.
+            // A sheet needs a window that is actually on screen — without one
+            // beginSheetModal never presents and its completion never runs,
+            // which would leave the quit hanging on a reply that can no longer
+            // come. No watchdog on this one: it is waiting on a person, and
+            // quitting out from under them is the data loss it exists to stop.
+            guard self.editors.contains(where: { $0.window?.isVisible == true }) else {
+                self.replyToTerminate(true); return
+            }
+
+            var queue = untitled
+            func step() {
+                guard !queue.isEmpty else { self.replyToTerminate(true); return }
+                let next = queue.removeFirst()
+                guard let editor = self.editor(of: next) else { step(); return }
+                editor.confirmClose(next) { ok in
+                    guard ok else { self.replyToTerminate(false); return }
+                    step()
+                }
+            }
+            step()
+        }
+    }
+
+    /// Ask the web layer for its history now, rather than waiting for its idle
+    /// timer. Used at the points where there may not be a later.
+    func commitHistory() {
+        // Not during a quit. The quit path has already committed and flushed;
+        // a commit landing after that would pin a snapshot in the web layer and
+        // queue a write that nothing is left to flush. Reachable by ⌘-Tabbing
+        // away while the discard sheet is up.
+        guard !terminating else { return }
+        for editor in editors where editor.webReady {
+            editor.fetchHistory { json in
+                if let json = json, !json.isEmpty { self.history.write(json) }
+            }
+        }
+    }
+
+    /// The writer's own stylesheet, into every editor. It goes in after
+    /// styles.css and after the theme, so it wins on specificity ties without
+    /// anybody having to write !important, and it reaches print and PDF for
+    /// free because both of those paginate the same live web view.
+    ///
+    /// One file, so one reading of it: a change is pushed everywhere or
+    /// nowhere, and an activation that changed nothing sends no message at all.
+    func pushUserCSS() {
+        let css = Templates.userCSS()
+        if css == lastUserCSS { return }
+        lastUserCSS = css
+        // A page that is not up yet is not skipped, it is simply not told
+        // twice: handleReady asks for the stylesheet as it comes up.
+        for editor in editors where editor.webReady { editor.sendUserCSS(css) }
+    }
+
+    /// The stylesheet a page that has only just come up has not been given
+    /// yet, whether or not the file has changed since it was last read.
+    func sendUserCSS(to editor: Editor) {
+        lastUserCSS = Templates.userCSS()
+        editor.sendUserCSS(lastUserCSS ?? "")
+    }
+
+    /// Whether the process may be killed outright at logout or restart rather
+    /// than being asked to quit. Info.plist opts in; this takes the permission
+    /// back for as long as anything is unsaved, which is the pairing Apple's
+    /// own documents use. Without it the opt-in would mean a restart could
+    /// take the last second of typing with it — the one thing the unsaved
+    /// buffers exist to prevent.
+    ///
+    /// Counted rather than set, because disable/enable is a counter in
+    /// ProcessInfo and an unbalanced call leaks the permission for the life of
+    /// the process. `suddenBlocked` is what keeps the pairs matched.
+    func suddenTermination() {
+        let unsaved = allTabs.contains { $0.dirty }
+        guard unsaved != suddenBlocked else { return }
+        suddenBlocked = unsaved
+        if unsaved { ProcessInfo.processInfo.disableSuddenTermination() }
+        else       { ProcessInfo.processInfo.enableSuddenTermination() }
+    }
+
+    // ------------------------------------------------------------------
+    // Session
+    // ------------------------------------------------------------------
+
+    /// One session for the app, whatever it is spread across. The keys hold a
+    /// flat strip of documents and cannot describe a window, so what goes out
+    /// is every window's tabs in the order the windows were made, and the one
+    /// document that was in front of the writer.
+    func saveSession() {
+        let defaults = UserDefaults.standard
+        let inFront = front?.activeTab
+
+        // The whole strip, untitled buffers included. A buffer only earns a
+        // place once it has been written, or the next launch would offer back
+        // a tab with nothing in it.
+        let strip = allTabs.filter { $0.url != nil || $0.scratchText != nil }
+        defaults.set(strip.map { tab -> String in
+            if let url = tab.url { return "f:" + url.path }
+            return "s:" + tab.scratchID
+        }, forKey: kOpenTabsKey)
+        defaults.set(strip.firstIndex { $0 === inFront } ?? 0, forKey: kActiveTabKey)
+
+        let saved = allTabs.filter { $0.url != nil }
+        defaults.set(saved.map { $0.url!.path }, forKey: kOpenDocsKey)
+        defaults.set(saved.firstIndex { $0 === inFront } ?? 0, forKey: kActiveDocKey)
+        // Written alongside so a build without tabs, or an older one, still
+        // finds the document that was in front.
+        if let url = inFront?.url { defaults.set(url.path, forKey: kLastDocKey) }
+        else { defaults.removeObject(forKey: kLastDocKey) }
+    }
+
+    // ------------------------------------------------------------------
+    // Reading and writing text
+    //
+    // This used to end with String(decoding:as:UTF8.self), which never fails:
+    // it substitutes U+FFFD for every byte it cannot make sense of. Open a
+    // Latin-1 file, type one character, and the autosave a second later wrote
+    // the replacement characters back over the original. There is no undo for
+    // that on disk, and nothing anywhere said it had happened.
+    //
+    // Two things fix it, and it needs both. Decoding stops guessing and says
+    // which encoding it used; writing then uses that same encoding rather than
+    // always UTF-8. Reading Latin-1 and writing UTF-8 is what destroyed the
+    // file — reading Latin-1 and writing Latin-1 round-trips every byte.
+    //
+    // Latin-1 is last and always succeeds, because every byte is a valid
+    // Latin-1 character. That is a feature here: it means a file is never
+    // refused for being in some 8-bit encoding we did not think of, and
+    // whatever it was, saving gives its bytes back unchanged. It is recorded
+    // as a guess rather than a fact, and the status bar says so.
+    // ------------------------------------------------------------------
+
+    struct TextFile {
+        let text: String
+        let encoding: String.Encoding
+        /// True when nothing identified the encoding and Latin-1 was assumed.
+        let guessed: Bool
+        /// The bytes this text was decoded from, as a save of it will expect to
+        /// find them. See Coordinated.Base.
+        var fingerprint: Int? = nil
+
+        var label: String {
+            let name: String
+            switch encoding {
+            case .utf8:            name = "UTF-8"
+            case .utf16:           name = "UTF-16"
+            case .utf16LittleEndian: name = "UTF-16 LE"
+            case .utf16BigEndian:  name = "UTF-16 BE"
+            case .utf32:           name = "UTF-32"
+            case .isoLatin1:       name = "Latin-1"
+            case .macOSRoman:      name = "Mac OS Roman"
+            case .windowsCP1252:   name = "Windows-1252"
+            default:               name = "Encoding \(encoding.rawValue)"
+            }
+            return guessed ? name + " (assumed)" : name
+        }
+    }
+
+    /// A file that is not text at all. Opening one and letting autosave have
+    /// it is the same data loss by a different road, and a NUL byte outside a
+    /// UTF-16 or UTF-32 file is the cheapest reliable tell there is.
+    func looksBinary(_ data: Data) -> Bool {
+        if data.starts(with: [0xFE, 0xFF]) || data.starts(with: [0xFF, 0xFE]) { return false }
+        if data.starts(with: [0x00, 0x00, 0xFE, 0xFF]) { return false }
+        return data.prefix(8000).contains(0x00)
+    }
+
+    /// What a read of a document came back with. Three answers rather than the
+    /// two an optional can carry, and the third is the one this exists for: a
+    /// file that could not be read whole is not the same thing as a file with
+    /// nothing in it, and a caller handed `nil` for both would open an empty
+    /// tab over a document somebody is halfway through writing.
+    enum ReadOutcome {
+        /// The document, read whole.
+        case text(TextFile)
+        /// The read was clean and there is nothing here to open: no file at the
+        /// path, or a file that is not text this app may edit.
+        case notText
+        /// Something is writing the file right now and it could not be read
+        /// whole. Nothing is handed back, and the sentence is for a person.
+        case busy(String)
+    }
+
+    /// Read a document, and answer on main when it has been read.
+    ///
+    /// Coordinated, so a file being written by iCloud or Dropbox is read after
+    /// that write rather than during it, and asynchronous, because waiting for
+    /// that on the thread the writer is typing on is what froze the app for two
+    /// seconds a document. Every decode goes inside the one coordinated block:
+    /// two reads would be two chances to catch the file in different states.
+    ///
+    /// `presenter(for:)` reads the tab list, so this is main's to call.
+    func readTextFile(_ url: URL, then: @escaping (ReadOutcome) -> Void) {
+        Coordinated.read(url, presenter: presenter(for: url), { u in
+            self.decodeTextFile(u)
+        }, then: { file, error in
+            if let error = error { then(.busy(error.localizedDescription)); return }
+            guard let file = file else { then(.notText); return }
+            then(.text(file))
+        })
+    }
+
+    private func decodeTextFile(_ url: URL) -> TextFile? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        if looksBinary(data) { return nil }
+        // Of these bytes, in this read, so that what a save of the document
+        // later expects to find is exactly what the writer was shown.
+        let read = Coordinated.Base.fingerprint(data)
+
+        // UTF-8 first and strictly. String(data:encoding:) returns nil on a
+        // byte sequence that is not valid UTF-8, which is the check the old
+        // code was missing.
+        if let s = String(data: data, encoding: .utf8) {
+            return TextFile(text: s, encoding: .utf8, guessed: false, fingerprint: read)
+        }
+        // A byte-order mark is the one time a file states its own encoding.
+        for (bom, enc) in [([0xFF, 0xFE, 0x00, 0x00], String.Encoding.utf32LittleEndian),
+                           ([0x00, 0x00, 0xFE, 0xFF], .utf32BigEndian),
+                           ([0xFF, 0xFE], .utf16LittleEndian),
+                           ([0xFE, 0xFF], .utf16BigEndian)] {
+            if data.starts(with: bom.map { UInt8($0) }),
+               let s = String(data: data, encoding: enc) {
+                return TextFile(text: s, encoding: enc, guessed: false, fingerprint: read)
+            }
+        }
+        // Then whatever the system can tell us, which includes the encoding
+        // recorded in the file's extended attributes by other Mac editors.
+        var used = String.Encoding.utf8
+        if let s = try? String(contentsOf: url, usedEncoding: &used) {
+            return TextFile(text: s, encoding: used, guessed: false, fingerprint: read)
+        }
+        // Last, and never fails.
+        if let s = String(data: data, encoding: .isoLatin1) {
+            return TextFile(text: s, encoding: .isoLatin1, guessed: true, fingerprint: read)
+        }
+        return nil
+    }
+
+    /// The presenter registered for a path, if a tab holds it. Handed to the
+    /// coordinator so that our own reads and writes are not reported back to us
+    /// a moment later as somebody else's change.
+    func presenter(for url: URL) -> DocPresenter? {
+        let target = url.standardizedFileURL
+        return allTabs.first { $0.url?.standardizedFileURL == target }?.presenter
+    }
+
+    /// What a write did, with nothing in it that belongs to the app. Kept apart
+    /// so the disk half can run on any thread and the state half always runs on
+    /// main, without either of them being written twice.
+    enum WriteOutcome {
+        /// Written. `promoted` when the file's own encoding could not hold the
+        /// text and UTF-8 was used instead.
+        case wrote(promoted: Bool)
+        case failed(String)
+        /// There was no document at the path to save into. Not a write that
+        /// failed — a document that is not where the app thought it was, which
+        /// wants a different answer and a different sentence, so it is kept
+        /// apart from `failed` rather than folded into it.
+        case vanished(String)
+        /// Something else wrote the file after this document last read or
+        /// saved it, and this save would have replaced that unseen, so nothing
+        /// was written. Not a failure either: the file is fine and so is the
+        /// text, and trying again a second later answers nothing. It wants a
+        /// person to say which version wins. See Coordinated.Base.
+        case conflict(String)
+        /// The text this save carried stopped being the document's before the
+        /// save reached the file — a reload, or an answer to the changed-on-disk
+        /// question, came in between. Nothing was written, and there is nothing
+        /// to report: whatever the document holds now is saved on its own.
+        case superseded
+    }
+
+    /// Every extended attribute the file at `src` carries, copied onto `dst`.
+    ///
+    /// Finder tags, Finder comments, the encoding some other Mac editor
+    /// recorded, a download's quarantine flag: all of that is extended
+    /// attributes, all of it is the writer's, and a freshly made file swapped
+    /// into place has none of it. com.apple.provenance is the one exception —
+    /// the kernel owns it and setxattr on it fails, and a loop that took that
+    /// for a real error would drop every attribute after it.
+    private static func carryXattrs(from src: String, to dst: String) {
+        let size = listxattr(src, nil, 0, 0)
+        guard size > 0 else { return }
+        var names = [CChar](repeating: 0, count: size)
+        guard listxattr(src, &names, size, 0) > 0 else { return }
+        for name in names.split(separator: 0).compactMap({ String(cString: Array($0) + [0]) }) {
+            if name == "com.apple.provenance" { continue }
+            let valueSize = getxattr(src, name, nil, 0, 0, 0)
+            guard valueSize >= 0 else { continue }
+            var value = [UInt8](repeating: 0, count: max(valueSize, 1))
+            if valueSize > 0 {
+                guard getxattr(src, name, &value, valueSize, 0, 0) >= 0 else { continue }
+            }
+            _ = setxattr(dst, name, value, valueSize, 0, 0)
+        }
+    }
+
+    /// Puts `data` where `url` is, keeping what the filesystem already knew
+    /// about the file that is there.
+    ///
+    /// `String.write(atomically: true)` writes a brand new file and swaps it
+    /// in. That is what makes it crash-safe, and it is also what made every
+    /// autosave quietly destroy the file's extended attributes and reset its
+    /// creation date — measured, against iA Writer, which preserves both.
+    /// Finder tags and Finder comments *are* extended attributes. None of it is
+    /// ours to throw away.
+    ///
+    /// So the swap is done by hand: stage the bytes beside the file, carry the
+    /// metadata across onto the staging file, and only then replace. Beside,
+    /// rather than in a temporary directory, so the replace is a rename on the
+    /// one volume; dot-prefixed and uniquely named, and it exists for the
+    /// length of the swap and no longer.
+    ///
+    /// The inode still changes and a hard link still breaks. That is simply
+    /// what an atomic replace is — iA Writer does the same — and the trade the
+    /// other way is a half-written document after a power cut.
+    ///
+    /// `lastLook` is asked once, after everything slow is done and immediately
+    /// before the swap, and nothing is replaced unless it says yes. It is where
+    /// a save checks the file is still the version its text was made from, and
+    /// it goes here rather than before the staging because that check is only
+    /// airtight against writers that coordinate. git, vim and cp do not, and
+    /// for them the gap between looking and swapping is a gap they can land
+    /// in. Staging first leaves that gap at one read, one hash and one rename.
+    /// Narrower is all it can be made; see writeToDisk for what is left.
+    ///
+    /// Returns whether the file was replaced.
+    private static func replaceContents(of url: URL, with data: Data,
+                                        lastLook: () -> Bool) throws -> Bool {
+        let fm = FileManager.default
+        // Nothing there yet: a Save As, or a file being created. No metadata to
+        // keep, and the ordinary atomic write is already the right answer.
+        guard let was = try? fm.attributesOfItem(atPath: url.path) else {
+            guard lastLook() else { return false }
+            try data.write(to: url, options: .atomic)
+            return true
+        }
+
+        let token = String(UInt32.random(in: 0 ... .max), radix: 16)
+        let staged = url.deletingLastPathComponent()
+            .appendingPathComponent(".\(url.lastPathComponent).minimark-\(token)")
+        do {
+            // Not atomically: this is a file nobody knows about yet, and an
+            // atomic write of it would only stage a staging file.
+            try data.write(to: staged)
+            carryXattrs(from: url.path, to: staged.path)
+            var keep: [FileAttributeKey: Any] = [:]
+            if let mode = was[.posixPermissions] { keep[.posixPermissions] = mode }
+            // When the document came into being is not a fact about this save.
+            if let born = was[.creationDate] { keep[.creationDate] = born }
+            if !keep.isEmpty { try? fm.setAttributes(keep, ofItemAtPath: staged.path) }
+            guard lastLook() else {
+                try? fm.removeItem(at: staged)
+                return false
+            }
+            // .usingNewMetadataOnly, because the metadata that matters is
+            // now on the staging file and that is the copy this option keeps.
+            // Neither option is right on its own: measured, this one leaves
+            // the permissions at 644 and the default rewrites them to 600.
+            // That is what the two lines above are for.
+            _ = try fm.replaceItemAt(url, withItemAt: staged, backupItemName: nil,
+                                     options: [.usingNewMetadataOnly])
+        } catch {
+            try? fm.removeItem(at: staged)
+            throw error
+        }
+        return true
+    }
+
+    /// The half that touches the disk. No app state is read or written here, so
+    /// it is safe anywhere; `applyWrite` does the rest, on main.
+    ///
+    /// Asynchronous, because coordination is: `done` is called on main once the
+    /// file has actually been written, which on a contended file is whenever
+    /// the other writer lets go. Nothing waits on a thread for it, and nothing
+    /// is written without the claim.
+    ///
+    /// `done` is told where the bytes went as well as how it went, because on a
+    /// contended file those are no longer the same question: a coordinated
+    /// rename while this write waits its turn carries it to the document's new
+    /// name, and the caller has a modification date to record against whichever
+    /// path it actually landed on.
+    ///
+    /// `intent` has no default on purpose. Whether a path with nothing at it is
+    /// a file waiting to be made or a document that has gone is the one thing
+    /// this cannot work out for itself, and a default would let a call site
+    /// answer it by not thinking about it.
+    ///
+    /// Nor has `expecting`, for the same reason: it is the ticket the save took
+    /// from its document along with the text, and a save of a document that is
+    /// already on disk replaces nothing unless the file is still the version
+    /// that text was made from — or one of this document's own saves since.
+    /// The check is made with the file held, after the new bytes are staged and
+    /// immediately before the swap, so no coordinating writer can land between
+    /// the look and the replace. A file that changed comes back as `conflict`
+    /// and is left exactly as it was; the caller decides who to ask. A save
+    /// that makes a file checks nothing — Save As has already asked about
+    /// anything in the way — but still moves the ticket's base on to what it
+    /// wrote, so the document's next save expects its own file.
+    ///
+    /// What is still open: a writer that does not coordinate — git, vim, cp —
+    /// can land in the gap between the last look and the rename, and is then
+    /// replaced unseen as it always was. The gap is one read, one hash and one
+    /// rename now rather than the length of a save, and it is not zero.
+    static func writeToDisk(_ text: String, to url: URL, encoding want: String.Encoding,
+                            intent: Coordinated.Intent,
+                            expecting ticket: Coordinated.Base.Ticket?,
+                            presenter: NSFilePresenter?,
+                            done: @escaping (WriteOutcome, URL) -> Void) {
+        // Which encoding wins is settled before anything touches the disk, so
+        // the two attempts cost one staged file rather than two. The file's own
+        // encoding first: if the writer has since typed something it cannot
+        // hold — an em dash into a Latin-1 file, an emoji into anything 8-bit —
+        // data(using:) returns nil rather than mangling, and the document is
+        // promoted to UTF-8 and stays that way. Promoting is safe in a way the
+        // reverse would not be: UTF-8 can hold everything the old encoding
+        // could.
+        var promoted = false
+        var payload = want == .utf8 ? nil : text.data(using: want)
+        if payload == nil {
+            payload = text.data(using: .utf8)
+            promoted = want != .utf8
+        }
+        guard let data = payload else {
+            done(.failed("The document could not be encoded."), url)
+            return
+        }
+
+        var outcome = WriteOutcome.failed("The file could not be written.")
+        // Where the bytes actually went. The same path unless the coordinator
+        // moved the claim while it was pending, and written before `then` runs
+        // for the same reason `outcome` is.
+        var landed = url
+        // One coordination for the whole attempt, not one per encoding. Taking
+        // it twice would let a sync client in between the two, and the second
+        // write would be racing the copy it had just uploaded.
+        Coordinated.write(url, intent: intent, presenter: presenter, { u in
+            landed = u
+            let payload = Coordinated.Base.fingerprint(data)
+            // Why the last look said no, when it did.
+            var refused: WriteOutcome?
+            do {
+                let swapped = try replaceContents(of: u, with: data) {
+                    guard intent == .update, let ticket = ticket else { return true }
+                    // Read whole, with the claim still held. A file that cannot
+                    // be read cannot be vouched for, and is not saved over.
+                    guard let now = try? Data(contentsOf: u) else {
+                        refused = FileManager.default.fileExists(atPath: u.path)
+                            ? .failed("“\(u.lastPathComponent)” could not be read to check that "
+                                      + "nothing else had changed it, so it was not saved over.")
+                            : .vanished(Coordinated.gone(u))
+                        return false
+                    }
+                    switch ticket.verdict(onDisk: Coordinated.Base.fingerprint(now), writing: payload) {
+                    case .replace:    return true
+                    case .already:    refused = .wrote(promoted: promoted)
+                    case .changed:    refused = .conflict(Coordinated.changed(u))
+                    case .superseded: refused = .superseded
+                    }
+                    return false
+                }
+                if swapped {
+                    ticket?.wrote(payload)
+                    outcome = .wrote(promoted: promoted)
+                } else if let refused = refused {
+                    outcome = refused
+                }
+            } catch {
+                outcome = .failed(error.localizedDescription)
+            }
+        }, then: { error in
+            // An error here means the file was never ours and nothing was
+            // written — the claim was cancelled, the coordinator refused, or
+            // there is no document at that path to save into. The last of those
+            // is not a bad write, it is a document that has gone somewhere, and
+            // the app answers it differently: it stops writing to that name
+            // rather than trying again a second later.
+            if let error = error {
+                done(Coordinated.isGone(error) ? .vanished(error.localizedDescription)
+                                               : .failed(error.localizedDescription), url)
+            } else { done(outcome, landed) }
+        })
+    }
+
+    // ------------------------------------------------------------------
+    // File coordination
+    //
+    // One presenter and one kernel watch per open document, one poll that
+    // looks at every one of them, and one place that decides what an outside
+    // change means. All of it walks every window's documents rather than one
+    // window's: a file does not care which strip of tabs it is in, and two
+    // windows asking it two different questions is how a document ends up
+    // with two answers.
+    // ------------------------------------------------------------------
+
+    /// Every tab holding this path, so the watcher does not report our own
+    /// write back to us as an outside change.
+    ///
+    /// The text as well as the mark, because the mark is no longer the only
+    /// thing a look compares. A save records what the file now says, so that a
+    /// later look at a file somebody rewrote with the same bytes — a `cp` of an
+    /// identical copy, a sync client putting back what we just sent it — is
+    /// recognised as saying nothing new rather than reloaded over the writer.
+    func stampFile(_ url: URL, text: String?) {
+        let now = fileMark(url)
+        let target = url.standardizedFileURL
+        for tab in allTabs where tab.url?.standardizedFileURL == target {
+            tab.mark = now
+            tab.stirred = false
+            if let text = text { tab.digest = DocTab.digest(of: text) }
+        }
+    }
+
+    /// Brings the registered presenters into line with the tabs, whatever just
+    /// happened to them. Reconciled rather than registered and unregistered at
+    /// each of the seven places a tab can change, because the cost of missing
+    /// one of those places is a presenter left registered on a file nobody has
+    /// open — and the coordination machinery will keep asking it to flush.
+    func syncPresenters() {
+        for tab in allTabs {
+            let want = tab.url?.standardizedFileURL
+            let have = tab.presenter?.currentURL.standardizedFileURL
+            guard want != have else { continue }
+            if let old = tab.presenter {
+                NSFileCoordinator.removeFilePresenter(old)
+                tab.presenter = nil
+            }
+            if let url = tab.url {
+                let fresh = DocPresenter(url: url, owner: self)
+                NSFileCoordinator.addFilePresenter(fresh)
+                tab.presenter = fresh
+            }
+        }
+    }
+
+    /// The same reconciliation for the kernel watches, and a separate pass
+    /// rather than three more lines inside the one above, because the two are
+    /// answerable for different things: a presenter is process-wide state the
+    /// coordination machinery holds on to, and a watch is a file descriptor.
+    /// Both are wrong in the same way if a tab changes and nobody notices.
+    func syncWatches() {
+        for tab in allTabs {
+            let want = tab.url?.standardizedFileURL
+            let have = tab.watch?.watching.standardizedFileURL
+            guard want != have else { continue }
+            tab.watch?.stop()
+            tab.watch = nil
+            guard let url = tab.url else { continue }
+            // Weak on both sides. The tab owns the watch, the watch's handler
+            // runs on its own queue long after any particular tab may have
+            // gone, and this closure is the one place the two could hold each
+            // other up.
+            tab.watch = DocWatch(url: url) { [weak self, weak tab] in
+                DispatchQueue.main.async {
+                    guard let self = self, let tab = tab,
+                          self.allTabs.contains(where: { $0 === tab }) else { return }
+                    tab.stirred = true
+                    self.lookSoon()
+                }
+            }
+        }
+    }
+
+    /// A look at every open document, soon, however many changes asked for it.
+    ///
+    /// The poll comes round on its own timer; this is what the kernel watch
+    /// uses instead of calling straight into checkFileOnDisk. One event is one
+    /// write() somebody made: a `git checkout` of a worktree with the folder
+    /// open fires one per document — measured, 200 documents, 200 events — and
+    /// each of those turning into a pass over every tab would be forty thousand
+    /// passes, and a coordinated read per tab per pass. Measured through this:
+    /// 200 stirs become one look, and the next 200 become one more.
+    fileprivate func lookSoon() {
+        guard !watchLookPending else { return }
+        watchLookPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + kWatchSettle) { [weak self] in
+            guard let self = self else { return }
+            self.watchLookPending = false
+            self.checkFileOnDisk()
+        }
+    }
+
+    /// Everything one tab holds on the filesystem's behalf, let go of.
+    ///
+    /// Called where a tab leaves the strip, which is the one place the
+    /// reconcilers above cannot help: they walk every window's tabs, so a tab
+    /// that is in none of them is never visited and whatever it registered is
+    /// never dropped. That is not hypothetical — measured, addFilePresenter takes a
+    /// reference of its own and holds it, so until this existed every closed
+    /// tab left a presenter registered on a file nobody had open, being asked
+    /// to flush a document that was not there. A descriptor left open would be
+    /// the same bug wearing a different hat.
+    func releaseFileWatching(_ tab: DocTab) {
+        if let p = tab.presenter {
+            NSFileCoordinator.removeFilePresenter(p)
+            tab.presenter = nil
+        }
+        tab.watch?.stop()
+        tab.watch = nil
+    }
+
+    /// Every seat this app holds, given up. For quit: a presenter outliving the
+    /// app it reports to would be asked to flush a document that no longer
+    /// exists, and a descriptor outliving it is a descriptor.
+    func dropFileWatching() {
+        for tab in allTabs { releaseFileWatching(tab) }
+    }
+
+    /// The file moved under an open tab — a Dropbox conflict rename, an iCloud
+    /// restore, a `git checkout` swapping it into place. Following it rather
+    /// than asking, because there is no question here that a person can answer
+    /// better than the filesystem already has: this is where the document went.
+    func documentMoved(_ presenter: DocPresenter, to newURL: URL) {
+        guard let tab = allTabs.first(where: { $0.presenter === presenter }),
+              let editor = editor(of: tab) else { return }
+        guard tab.url?.standardizedFileURL != newURL.standardizedFileURL else { return }
+        // Trashed, which arrives here rather than as a deletion — measured:
+        // trashItem is a move, and the only thing a presenter is told about it
+        // is where the file went. This is the one move not to follow. Doing so
+        // would leave the autosave writing into ~/.Trash every second, which is
+        // the writer's work kept in the one folder that exists to be emptied
+        // and a file they meant to delete refusing to stay deleted.
+        //
+        // The tab keeps the name it had rather than taking the Trash's, so a
+        // file put back where it came from is found by the poll and simply
+        // picked up again — no sheet, no Save As, the document carries on.
+        // pushTabs is what moves the presenter off the Trash and back onto that
+        // path to wait for it.
+        guard !isInTrash(newURL) else {
+            editor.documentVanished(tab, why: Coordinated.gone(tab.url ?? newURL))
+            editor.pushTabs()
+            return
+        }
+        tab.url = newURL
+        tab.mark = fileMark(newURL)
+        // Where it went is the answer to where it had gone. A bare `mv` reaches
+        // here about a second after the fact — measured — which is often after
+        // the write that was aimed at the old name has already been refused,
+        // and sometimes after the poll has given the document up. Either way it
+        // has a file again, so it saves again.
+        editor.documentFound(tab)
+        NSDocumentController.shared.noteNewRecentDocumentURL(newURL)
+        pushRecents()
+        if tab.id == editor.activeID { editor.syncWindowToTab() }
+        editor.pushTabs()
+        saveSession()
+    }
+
+    /// A coordinated delete, arriving from the presenter before the file goes
+    /// rather than from the poll a moment after it has. The answer is the same
+    /// one either way — there is a single place that decides what a document
+    /// with no file means, and this is not it.
+    ///
+    /// It is not a verdict, either, and taking it for one was wrong. Measured,
+    /// with the real presenter registered on a real file: a coordinated write
+    /// taken with `.forReplacing` — which is what every atomic save declares,
+    /// this app's own included — reaches a presenter as
+    /// accommodatePresentedItemDeletion, before the write, exactly as a real
+    /// deletion does. A plain coordinated write does not. So the callback that
+    /// means "somebody is deleting your document" also means "somebody is
+    /// saving your document from another editor", and nothing in it says which.
+    /// Believing it made every outside save mark the document gone: the status
+    /// bar said "not saving", the autosave went to the crash buffer, and ⌘S
+    /// asked where to put the file — until the next poll found the file exactly
+    /// where it had always been and quietly took it all back.
+    ///
+    /// What tells the two apart is the only thing that ever could: whether
+    /// there is a file there afterwards. So this looks instead of concluding,
+    /// with the same rule the poll uses and for the same reason — one look is
+    /// not enough, and the numbers behind that are in noteMissing. What it buys
+    /// over simply waiting for the poll is speed: a document that really was
+    /// deleted is called gone within half a second rather than within four.
+    ///
+    /// Nothing is at risk in that half second. The thing that stops a save
+    /// recreating a file somebody is deleting is not this flag, it is the
+    /// write's own intent — a save of a document with nothing at its path is
+    /// refused whenever it is issued.
+    func documentDeleted(_ presenter: DocPresenter) {
+        guard allTabs.contains(where: { $0.presenter === presenter }) else { return }
+        // The first look is far enough past the callback for the deletion to
+        // have happened; the second is the gap goneForGood asks for, plus a
+        // little, so that two looks finding nothing really are a verdict.
+        for delay in [kFirstLookAfterDeletion,
+                      kFirstLookAfterDeletion + kAbsentBeforeGone + 0.05] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.checkFileOnDisk()
+            }
+        }
+    }
+
+    /// Another process is about to read this file and has asked us to put what
+    /// is unsaved on disk first. Writing now is what keeps a conflict from
+    /// being made at all — the sync client uploads the sentence just typed
+    /// rather than the one before it — and it is the same write the autosave
+    /// would have done within the second anyway.
+    ///
+    /// `done` runs on every path, including the ones where there is nothing to
+    /// write, because a writer somewhere is waiting on it.
+    func flushForCoordination(_ url: URL, done: @escaping () -> Void) {
+        let target = url.standardizedFileURL
+        // `hasFile`, because a document whose file has gone has nothing to
+        // flush: the other process is about to read a path this app already
+        // knows is empty, and writing our text into it first would recreate the
+        // name rather than answer the question. `done` still runs, because
+        // somebody is waiting on it either way.
+        //
+        // A flush is a save, and gets the same check as every other: see
+        // writeToDisk. `conflicted` means the check has already said no and
+        // nobody has answered yet, so the other process reads what is on disk
+        // — which is what it would read after a refused flush anyway, without
+        // this app taking the file from everybody first to find that out.
+        guard let tab = allTabs.first(where: { $0.url?.standardizedFileURL == target }),
+              let editor = editor(of: tab),
+              tab.dirty, tab.hasFile, !tab.conflicted else { done(); return }
+        let ticket = tab.base.ticket()
+        editor.fetchText(tab.id) { text in
+            guard let text = text, let live = tab.url,
+                  live.standardizedFileURL == target else { done(); return }
+            editor.write(text, to: live, expecting: ticket, silent: true, tab: tab) { ok in
+                if ok {
+                    editor.noteAutosave(tab, ok: true)
+                    tab.dirty = false
+                    editor.window?.isDocumentEdited = editor.tabs.contains { $0.dirty }
+                    self.suddenTermination()
+                    editor.js("if(window.App)App.autoSaved(\(tab.id))")
+                } else {
+                    editor.noteAutosave(tab, ok: false)
+                }
+                done()
+            }
+        }
+    }
+
+    /// The backstop, and still needed with presenters registered and a
+    /// descriptor on every open document. A presenter only hears from writers
+    /// that coordinate; git, vim, sed and rsync do not, and they are most of
+    /// what actually edits a markdown file behind an editor's back. What
+    /// changed is that the poll is no longer the only way an outside change is
+    /// noticed — a coordinated writer reaches checkFileOnDisk the moment it
+    /// finishes, and the kernel says so for a document rewritten in place,
+    /// rather than up to two seconds later and possibly mid-write.
+    ///
+    /// This does not shrink and must not. A vnode source needs a descriptor on
+    /// a real file, which network mounts and virtual filesystems do not always
+    /// give; a presenter needs the other process to be coordinating. The poll
+    /// needs nothing but stat, which is the point of it — and it is also what
+    /// re-arms a watch left on a file an atomic replace took away.
+    func startWatching() {
+        let timer = Timer(timeInterval: kWatchInterval, repeats: true) { [weak self] _ in
+            self?.checkFileOnDisk()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        watchTimer = timer
+    }
+
+    /// Every open document, not only the one on screen — a tab you are not
+    /// looking at is exactly the one something else is most likely to change
+    /// underneath you.
+    ///
+    /// Only the one in front ever asks a question. A background document that
+    /// has been edited elsewhere and has nothing unsaved of its own is simply
+    /// brought up to date; one with unsaved changes is left alone until you go
+    /// back to it, which is when there is a person to ask.
+    ///
+    /// A file that does not answer at all is its own case now. It used to share
+    /// a line with a file that could not be statted this instant — `guard let
+    /// now = modificationDate(url) else { continue }` — which meant a document
+    /// that had been deleted was skipped over, silently, every two seconds, for
+    /// as long as the app was open. See noteMissing for how the two are told
+    /// apart and documentVanished for what happens once they are.
+    ///
+    /// And a file whose mark says nothing changed is not proof that nothing
+    /// did. `stirred` is the kernel saying this document was rewritten in place
+    /// since the last look, which is the one shape that can carry the old
+    /// timestamp; it is a reason to look, not a verdict, and what comes back is
+    /// compared against the tab's digest like anything else. See DocWatch.
+    func checkFileOnDisk() {
+        guard !reloadPromptUp else { return }
+        for (editor, tab) in allTabsAndWindows {
+            guard let url = tab.url else { continue }
+            guard let now = fileMark(url) else { editor.noteMissing(tab, at: url); continue }
+            // There is a file here, so whatever the last few looks thought is
+            // forgotten — and if the document had been given up for gone, this
+            // is where it stops being. Everything below runs as usual on the way
+            // back, so a file that returns with different bytes is reloaded, or
+            // asked about, exactly like any other outside change.
+            editor.documentFound(tab)
+            // And a file here is also something to watch. An atomic replace —
+            // anyone's — leaves the old descriptor on a file the path no longer
+            // names, and the watch re-arms itself for that; this is the backstop
+            // for the re-arm that happened while the path was empty. Costs a
+            // branch on every look and a syscall only when it is actually
+            // disarmed.
+            tab.watch?.ensureArmed()
+            guard let known = tab.mark else { tab.mark = now; tab.stirred = false; continue }
+            guard now != known || tab.stirred else { continue }
+
+            // A read of this tab is already out. Reads are unbounded, so a file
+            // somebody is holding leaves one in the air for as long as they
+            // like, and a poll that issued another every two seconds would
+            // stack up a queue of them all landing at once — each carrying an
+            // older copy of the document than the last.
+            guard !tab.reading else { continue }
+
+            // Nothing unsaved here, so there is nothing to decide: take the
+            // new text, whether or not this is the document on screen.
+            guard tab.dirty else {
+                reread(tab, at: url, seenAt: now) { text, kept, read in
+                    // Unless somebody typed in it while the read was out. That
+                    // was impossible when this was synchronous and it is one
+                    // keystroke away now, and loading over it would throw away
+                    // a sentence nobody has a copy of. Left unhandled on
+                    // purpose: the next pass finds the tab dirty and asks.
+                    //
+                    // And the next save is what makes sure of that. A save of
+                    // the typing lands on a file this tab has not taken in yet,
+                    // and the base still says so, so the save is refused and
+                    // the question asked — rather than the save quietly
+                    // replacing what this read found and its stamp telling the
+                    // next pass there had been nothing to ask about.
+                    guard !tab.dirty else { return false }
+                    tab.authorship = kept
+                    tab.base.rebase(to: read)
+                    editor.conflictDiscarded(tab)
+                    editor.js("if(window.App)App.externalChange(\(jsLiteral(text)),\(tab.id))")
+                    return true
+                }
+                continue
+            }
+
+            // Unsaved changes on both sides. Only the document in front gets
+            // asked about, and the others keep their old modification date on
+            // purpose — dropping it here would mark the change as handled and
+            // the question would never be asked when you came back to the tab.
+            guard tab.id == editor.activeID, editor.window?.isVisible == true else { continue }
+
+            // Claimed before the read rather than after it, because the read is
+            // out for as long as the other writer wants and the poll comes
+            // round every two seconds. Without this the same change would ask
+            // twice — or the second sheet would arrive on top of the first.
+            reloadPromptUp = true
+            reread(tab, at: url, seenAt: now) { text, kept, read in
+                // The window and the front tab were both checked on the way
+                // out, and a read can be out for a while. Anything that has
+                // changed since means there is no longer a question to ask, or
+                // nobody in front of it to answer — so it goes unhandled and
+                // the poll comes back to it rather than being stamped away.
+                guard let window = editor.window, window.isVisible,
+                      tab.id == editor.activeID, tab.dirty else { return false }
+                let alert = NSAlert()
+                alert.messageText = "“\(url.lastPathComponent)” changed on disk"
+                alert.informativeText = "You have unsaved changes here. Reload the file, or keep what "
+                    + "is on screen and save it over the file? Either way the version you do not keep "
+                    + "opens in a tab of its own, so neither is lost."
+                alert.addButton(withTitle: "Reload")
+                alert.addButton(withTitle: "Keep Mine")
+                // Until this is answered the document's base stays where it
+                // was, so a save arriving while the sheet is up — the autosave
+                // of a keystroke typed just before it, a presenter's flush — is
+                // refused rather than deciding the question for the writer.
+                alert.beginSheetModal(for: window) { response in
+                    self.reloadPromptUp = false
+                    guard editor.tabs.contains(where: { $0 === tab }) else { return }
+                    // Either answer says what the text on screen now answers
+                    // to: the version read here. A save still out from before
+                    // the answer is refused when it reaches the file, whichever
+                    // way the answer went. If the file has moved on again since
+                    // this read, the next save finds that and asks again, about
+                    // the version the writer has not seen.
+                    tab.base.rebase(to: read)
+                    guard response == .alertFirstButtonReturn else {
+                        // Keep Mine. The tab keeps the block that goes with
+                        // what is on screen, and its text goes over the file —
+                        // but not before the version it replaces has somewhere
+                        // to be, because that is somebody's work too and this
+                        // is the moment it would otherwise be gone for good.
+                        let aside = editor.keepAside(text, authorship: kept,
+                                                     named: editor.asideName(tab, "on disk"), after: tab)
+                        editor.toast("The version from disk is in “\(aside.name)”")
+                        editor.conflictCleared(tab)
+                        return
+                    }
+                    // Reload. The file's version wins the document — but the
+                    // page the writer had goes into a tab of its own first,
+                    // for the same reason the other button sets the file's
+                    // version aside: it is somebody's work, and this is the
+                    // moment it would otherwise be gone. Keep Mine already
+                    // kept both, and a tab closed mid-save already keeps the
+                    // writing it could not save; Reload was the one way left
+                    // to destroy the page somebody had just typed, which is
+                    // the one loss this file says is not recoverable.
+                    //
+                    // From the insurance rather than the page: the refusal put
+                    // it there, so there is nothing to ask the web layer for,
+                    // and nothing to get wrong while the sheet comes down.
+                    if let mine = tab.scratchText, !mine.isEmpty, mine != text {
+                        let aside = editor.keepAside(mine, authorship: tab.authorship,
+                                                     named: editor.asideName(tab, "yours"), after: tab)
+                        editor.toast("Your version is in “\(aside.name)”")
+                    }
+                    tab.dirty = false
+                    editor.window?.isDocumentEdited = editor.tabs.contains { $0.dirty }
+                    self.suddenTermination()
+                    tab.authorship = kept
+                    editor.conflictDiscarded(tab)
+                    editor.js("if(window.App)App.externalChange(\(jsLiteral(text)),\(tab.id))")
+                }
+                return true
+            } otherwise: {
+                // Nothing to ask about after all: the file would not settle, it
+                // stopped being text, or the question stopped being one. The
+                // claim has to go back or the poll is silenced for good.
+                self.reloadPromptUp = false
+            }
+            return                              // one question at a time
+        }
+    }
+
+    /// Read a document that has changed underneath its tab, and hand the text
+    /// to whatever the caller does about it.
+    ///
+    /// Everything that has to be true on the way back lives here rather than in
+    /// each caller, because the way back is now a different moment from the way
+    /// out and every one of these has bitten something at some point. The tab
+    /// may have been closed. It may have been renamed, or moved, or given up
+    /// for gone, in which case this text belongs to a path it has left. It may
+    /// have been typed in, which turns a quiet reload into a question — so that
+    /// judgement is the caller's and is made when the text arrives, not when it
+    /// was asked for.
+    ///
+    /// `use` says whether it did something with the text, and only then is the
+    /// change written off as handled. A change the app looked at and decided
+    /// not to act on this time is a change it still has to act on next time,
+    /// and recording the date would lose the question for good.
+    ///
+    /// `seenAt` is the mark that triggered the read, and it is what gets
+    /// recorded rather than the mark afterwards. If the file has moved on again
+    /// since, the poll should come back for it, and stamping the newer mark
+    /// would be saying this text is the newer file's.
+    ///
+    /// A read that could not be settled records nothing at all. That is the
+    /// point of the whole exercise: the file is left looking changed, so the
+    /// next poll asks again, rather than half of it being taken for all of it.
+    ///
+    /// And a file that was written but says the same thing never reaches `use`
+    /// at all. That is not an optimisation, it is the difference between the
+    /// kernel watch being an improvement and being a nuisance: the watch fires
+    /// on a rewrite, not on a change, and a great deal of what rewrites a file
+    /// writes the same bytes back. Reaching `use` with them would put "Reloaded
+    /// from disk" in front of somebody typing, throw away a background tab's
+    /// undo stack, or ask whether to discard unsaved work — over a document
+    /// that says exactly what it said before. The look still counts as
+    /// finished, because it was: this is what the file says and the tab now
+    /// knows it.
+    ///
+    /// `use` is also handed the fingerprint of the bytes that were read, and
+    /// moving the document's base to it is the caller's business rather than
+    /// this function's: a reload moves it at once, and the question moves it
+    /// only when it has been answered.
+    private func reread(_ tab: DocTab, at url: URL, seenAt: FileMark,
+                        _ use: @escaping (String, Authorship?, Int?) -> Bool,
+                        otherwise: (() -> Void)? = nil) {
+        tab.reading = true
+        // Taken as the read goes out, so that a save of ours landing while it
+        // is out is not undone by the older news this brings back. See
+        // Base.agree.
+        let moved = tab.base.moved
+        readTextFile(url) { outcome in
+            tab.reading = false
+            guard case .text(let file) = outcome,
+                  let editor = self.editor(of: tab),
+                  tab.url?.standardizedFileURL == url.standardizedFileURL,
+                  !tab.vanished else { otherwise?(); return }
+            let digest = DocTab.digest(of: file.text)
+            guard tab.digest != digest else {
+                // The encoding is taken even so. Rewriting a file into another
+                // encoding leaves the text identical and the bytes different,
+                // and a save that did not know would quietly put it back the
+                // way it was.
+                tab.encoding = file.encoding
+                tab.encodingGuessed = file.guessed
+                tab.mark = seenAt
+                tab.stirred = false
+                // And so are the bytes, for the same reason from the other
+                // side: a save expecting the old ones would take this rewrite
+                // for somebody else's work and refuse, every time, with nothing
+                // to ask anybody about.
+                tab.base.agree(with: file.fingerprint, unlessMovedSince: moved)
+                // Which is also the answer to a save that was refused over
+                // this: there was nothing to choose between after all.
+                if tab.conflicted { editor.conflictCleared(tab) }
+                otherwise?()
+                return
+            }
+            // Without iA Writer's authorship block, and with it separately:
+            // which block the tab keeps depends on whether the page takes this
+            // text, and only the caller knows that, sometimes only after asking.
+            let kept = Authorship.split(file.text)
+            guard use(kept?.body ?? file.text, kept, file.fingerprint) else { otherwise?(); return }
+            tab.encoding = file.encoding
+            tab.encodingGuessed = file.guessed
+            tab.mark = seenAt
+            tab.stirred = false
+            tab.digest = digest
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Menu actions
+    //
+    // One menu bar for the app, so each item is aimed at the window in front.
+    // ------------------------------------------------------------------
+
+    @objc func webCommand(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        front?.command(name)
+    }
+
+    /// The formatting run at the bottom of the right-click menu. The same
+    /// actions the selection bubble offers, because a writer who has just
+    /// right-clicked a word is asking the same question the bubble answers,
+    /// and having to go and find the bubble instead is the friction.
+    func formattingMenuItems() -> [NSMenuItem] {
+        let actions: [(String, String, String)] = [
+            ("Bold",          "bold",   "b"),
+            ("Italic",        "italic", "i"),
+            ("Strikethrough", "strike", ""),
+            ("Inline Code",   "code",   "e"),
+            ("Link…",         "link",   "")
+        ]
+        return actions.map { title, name, key in
+            let item = NSMenuItem(title: title, action: #selector(webCommand(_:)), keyEquivalent: key)
+            // Shown, not armed. The real shortcut is already on the Format
+            // menu; a second live copy inside a context menu would fire twice.
+            item.keyEquivalentModifierMask = key.isEmpty ? [] : [.command]
+            item.isEnabled = true
+            item.target = self
+            item.representedObject = name
+            return item
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Open Recent
+    //
+    // The list itself is NSDocumentController's, so it is deduped, capped and
+    // persisted by AppKit, and the same entries turn up in the Dock menu and
+    // the Apple menu's Recent Items for free. This app has no NSDocument
+    // subclasses, but noteNewRecentDocumentURL does not require one.
+    // ------------------------------------------------------------------
+
+    /// Recent documents that are still on disk. A menu that offers a file it
+    /// cannot open is worse than a shorter menu.
+    func recentDocuments() -> [URL] {
+        // Every file already in a tab is dropped, not only the one in front:
+        // offering to open something that is one click away in the strip is
+        // noise, and taking it would only bring that tab forward anyway.
+        let open = Set(allTabs.compactMap { $0.url?.standardizedFileURL })
+        return NSDocumentController.shared.recentDocumentURLs.filter { url in
+            !open.contains(url.standardizedFileURL)
+                && FileManager.default.isReadableFile(atPath: url.path)
+        }
+    }
+
+    /// Two files called Notes.md need telling apart, so a name that appears
+    /// more than once carries its enclosing folder.
+    func recentTitles(_ urls: [URL]) -> [String] {
+        var seen: [String: Int] = [:]
+        for url in urls { seen[url.lastPathComponent, default: 0] += 1 }
+        return urls.map { url in
+            let name = url.lastPathComponent
+            guard seen[name, default: 0] > 1 else { return name }
+            let folder = url.deletingLastPathComponent().lastPathComponent
+            return folder.isEmpty ? name : "\(name) — \(folder)"
+        }
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === recentMenu else { return }
+        menu.removeAllItems()
+        let urls = recentDocuments()
+        if urls.isEmpty {
+            // a nil action is all it takes: AppKit greys it out for us
+            menu.addItem(NSMenuItem(title: "No Recent Documents", action: nil, keyEquivalent: ""))
+            return
+        }
+        let titles = recentTitles(urls)
+        for (i, url) in urls.enumerated() {
+            let item = NSMenuItem(title: titles[i], action: #selector(openRecent(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = url
+            item.toolTip = url.path
+            let icon = NSWorkspace.shared.icon(forFile: url.path)
+            icon.size = NSSize(width: 16, height: 16)
+            item.image = icon
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let clear = NSMenuItem(title: "Clear Menu", action: #selector(clearRecent(_:)), keyEquivalent: "")
+        clear.target = self
+        menu.addItem(clear)
+    }
+
+    @objc func openRecent(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        openRecentDocument(url)
+    }
+
+    func openRecentDocument(_ url: URL) {
+        // Both the menu and the palette are built from readable files only, so
+        // this is a race guard: the file went while the list was on screen.
+        guard FileManager.default.isReadableFile(atPath: url.path) else {
+            pushRecents()
+            presentError("Could not open “\(url.lastPathComponent)”",
+                         "The file has been moved, renamed or deleted.")
+            return
+        }
+        front?.openDocument(at: url)
+    }
+
+    /// The recent list is the app's — NSDocumentController keeps it, and which
+    /// documents are already open is a question about every window — so every
+    /// page is given the same answer.
+    func pushRecents() {
+        for editor in editors { editor.pushRecents() }
+    }
+
+    @objc func clearRecent(_ sender: Any?) {
+        NSDocumentController.shared.clearRecentDocuments(sender)
+        pushRecents()
+    }
+
+    // ------------------------------------------------------------------
+    // The menu bar's File and View commands
+    //
+    // The menu is the app's and there is one of it, so each item is aimed at
+    // the window in front and the work lives on that window. `runMenuAction`
+    // on Editor is the same list reached from the palette, where the page that
+    // asked is the window that answers.
+    // ------------------------------------------------------------------
+
+    @objc func menuNew(_ sender: Any?) { front?.newDocument() }
+
+    @objc func menuCloseTab(_ sender: Any?) { front?.closeActiveTab() }
+
+    @objc func menuOpen(_ sender: Any?) { front?.openPanel() }
+
+    @objc func menuSave(_ sender: Any?) { front?.saveDocument { _ in } }
+
+    @objc func menuSaveAs(_ sender: Any?) { front?.saveAs { _ in } }
+
+    @objc func menuRename(_ sender: Any?) { front?.renamePrompt() }
+
+    @objc func menuExportHTML(_ sender: Any?) { front?.exportHTML() }
+
+    @objc func menuExportPDF(_ sender: Any?) { front?.exportPDF() }
+
+    @objc func menuPrint(_ sender: Any?) { front?.printDocument() }
+
+    @objc func menuPageSetup(_ sender: Any?) { front?.pageSetup() }
+
+    @objc func menuReveal(_ sender: Any?) { front?.revealInFinder() }
+
+    /// Four libraries do work in here that this app does not do itself, and
+    /// three of them are the reason it can render anything at all. Naming them
+    /// is a licence condition for all four, and it belongs somewhere a person
+    /// can find it rather than only in a file in the repository.
+    ///
+    /// Versions are the ones vendored in Resources/vendor, read off their own
+    /// banners rather than remembered. Turndown ships without one, so it is
+    /// listed without a version rather than with a guessed one.
+    @objc func menuAcknowledgements(_ sender: Any?) {
+        let alert = NSAlert()
+        alert.messageText = "Acknowledgements"
+        alert.informativeText = """
+            minimark is built on work other people gave away.
+
+            marked 12.0.2 — MIT
+            Christopher Jeffrey and contributors
+            github.com/markedjs/marked
+
+            Turndown — MIT
+            Dom Christie
+            github.com/mixmark-io/turndown
+
+            highlight.js 11.11.1 — BSD 3-Clause
+            Ivan Sagalaev and contributors
+            github.com/highlightjs/highlight.js
+
+            KaTeX 0.16.47 — MIT
+            Khan Academy and contributors
+            github.com/KaTeX/KaTeX
+
+            The full licence text for each ships in NOTICES beside the app's             source. Their fonts and stylesheets are included unmodified.
+            """
+        alert.addButton(withTitle: "OK")
+        if let w = front?.window, w.isVisible {
+            alert.beginSheetModal(for: w, completionHandler: nil)
+        } else {
+            alert.runModal()
+        }
+    }
+
+    /// Opens ~/Library/Application Support/minimark/ in Finder, writing the
+    /// two starter files first if they are not there. Both are inert as
+    /// shipped — the CSS is entirely inside a comment and the template is the
+    /// built-in page — so opening the folder cannot change how the app looks
+    /// until somebody decides it should.
+    @objc func menuTemplates(_ sender: Any?) {
+        Templates.writeStartersIfMissing()
+        guard let dir = Templates.dir else {
+            presentError("Could not open the templates folder",
+                         "minimark could not reach its Application Support folder.")
+            return
+        }
+        NSWorkspace.shared.open(dir)
+    }
+
+    @objc func menuInsertImageItem(_ sender: Any?) {
+        front?.menuInsertImage()
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        // The tab items are the one place the menu has state to show as well
+        // as to enable: "Keep Tabs Showing" is a toggle and reads its own pref.
+        if let name = menuItem.representedObject as? String {
+            switch name {
+            case "nextTab", "prevTab":
+                return (front?.tabs.count ?? 0) > 1
+            case "toggleTabs":
+                menuItem.state = UserDefaults.standard.string(forKey: "tabsPin") == "1" ? .on : .off
+                return true
+            default:
+                return true
+            }
+        }
+        switch menuItem.action {
+        case #selector(menuReveal(_:)), #selector(menuRename(_:)):
+            return front?.docURL != nil
+        default:
+            return true
+        }
+    }
+}
+
 /// The exported page's stylesheet, kept apart from the document that wraps it
 /// so a template can ask for it by name with {{style}} without the two having
 /// to agree on anything else.
@@ -6574,7 +6765,7 @@ let kExportCSS = """
           th { background: rgba(127,127,127,.08); }
 """
 
-extension AppDelegate {
+extension Editor {
     func presentError(_ title: String, _ detail: String) {
         let alert = NSAlert()
         alert.messageText = title
@@ -6586,6 +6777,21 @@ extension AppDelegate {
         } else {
             alert.runModal()
         }
+    }
+}
+
+extension AppDelegate {
+    /// The same alert, for the handful of things the app does rather than a
+    /// window: it goes on the window in front, or stands on its own if there
+    /// is none.
+    func presentError(_ title: String, _ detail: String) {
+        if let editor = front { editor.presentError(title, detail); return }
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = detail
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     // ------------------------------------------------------------------
