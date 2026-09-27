@@ -2187,7 +2187,7 @@ window.MM = (function () {
     var html = dt.getData('text/html') || '';
     var s = ta.selectionStart, t = ta.selectionEnd, sel = ta.value.slice(s, t);
 
-    /* Remember a pasted URL so ⌘⇧K can drop it straight into the link.
+    /* Remember a pasted URL so ⇧⌘K can drop it straight into the link.
        insertLink has always read state.lastURL, but nothing ever wrote it,
        so the link command produced an empty () every time. */
     if (/^(https?|mailto):\S+$/i.test(plain.trim())) state.lastURL = plain.trim();

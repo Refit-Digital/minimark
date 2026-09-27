@@ -176,6 +176,73 @@ report('every placeholder the exporter substitutes is documented',
   substituted.filter(p => !promised.includes(p)),
   'htmlDocument fills these in and nothing tells anyone they exist:');
 
+/* ------------------------------------------------------------------
+   The keys the app advertises
+
+   Three places tell the writer what a shortcut is: the menu bar, the command
+   palette in ui.js, and the reference sheet in index.html. Only the menu bar
+   is real — the other two are strings. ⌘N used to make a tab and now makes a
+   window, and both of the others went on saying "New ⌘N" afterwards, which is
+   worse than saying nothing: somebody learns it from there.
+
+   So: for every item the File/Edit/Format menus give a key to, if either of
+   the other two names that same item, the key has to match. Titles are
+   compared with case and trailing ellipses ignored, because the menu shouts
+   ("New Window") where the other two do not.
+   ------------------------------------------------------------------ */
+
+const MODS = { command: '⌘', shift: '⇧', option: '⌥', control: '⌃' };
+
+/* `add(menu, "Title", key: "n", mods: [.command, .shift], ...)` → ⇧⌘N.
+   AppKit's own order is control, option, shift, command, and the sheet and the
+   palette are written that way, so build the string in that order. */
+const menuKeys = (() => {
+  const out = {};
+  const re = /\badd\(\s*\w+\s*,\s*"([^"]+)"\s*,\s*key:\s*"([^"]+)"([^)]*)/g;
+  let m;
+  while ((m = re.exec(swift))) {
+    const [, title, key, rest] = m;
+    const mods = /mods:\s*\[([^\]]*)\]/.exec(rest);
+    const set = mods ? mods[1] : '.command';
+    let s = '';
+    for (const name of ['control', 'option', 'shift', 'command']) {
+      if (set.includes('.' + name)) s += MODS[name];
+    }
+    out[norm(title)] = s + key.toUpperCase();
+  }
+  return out;
+})();
+
+function norm(t) { return t.replace(/[….]+$/, '').trim().toLowerCase(); }
+
+/* The reference sheet: <span>Label<kbd>⌘N</kbd>…</span>, sometimes with a
+   second <kbd> for an alternative. The first one is what it teaches. */
+const sheetKeys = (() => {
+  const html = read(path.join(resDir, 'index.html'));
+  const out = {};
+  const re = /<span>([^<]+)<kbd>([^<]+)<\/kbd>/g;
+  let m;
+  while ((m = re.exec(html))) out[norm(m[1])] = m[2].trim();
+  return out;
+})();
+
+/* The palette: { title: 'New window', key: '⌘N', … } */
+const paletteKeys = (() => {
+  const out = {};
+  const re = /\{\s*title:\s*'([^']+)'\s*,\s*key:\s*'([^']+)'/g;
+  let m;
+  while ((m = re.exec(js))) out[norm(m[1])] = m[2].trim();
+  return out;
+})();
+
+for (const [where, table] of [['the reference sheet', sheetKeys], ['the command palette', paletteKeys]]) {
+  const wrong = Object.keys(table)
+    .filter(t => menuKeys[t] && menuKeys[t] !== table[t])
+    .map(t => `${t}: ${where} says ${table[t]}, the menu says ${menuKeys[t]}`);
+  report(`${where} advertises the keys the menu actually has`, wrong,
+    'these disagree with the menu bar:');
+}
+
 /* Unused in the other direction is worth knowing about but is not a failure:
    the shell legitimately defines cases for messages an older page sent, and
    the page legitimately exposes functions for a shell that has not caught up. */

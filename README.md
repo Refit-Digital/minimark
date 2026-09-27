@@ -23,6 +23,11 @@ you can add and remove rows and columns from where the caret already is, and `[[
 your own files. Paste a web page and it arrives as clean markdown; paste an image and it's saved
 beside your document.
 
+Six themes, five typefaces and a text size that remembers where you put it. `⌘,` opens this, and
+nothing here needs a preferences window.
+
+![The appearance panel over a document in the dark Void theme, set in Iowan](docs/appearance.png)
+
 `⌘N` opens a window, `⌘T` a tab. One file is only ever open in one place — ask for a document
 another window already has and that window comes forward rather than handing you a second copy of it
 to lose work in.
