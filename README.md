@@ -5,12 +5,17 @@ A quiet place to write markdown, for macOS.
 No toolbar, no sidebar, no sign-in, no subscription, no telemetry. One window with your words in it,
 and everything else a keystroke away when you want it.
 
+![Split view: markdown on the left, the rendered document on the right](docs/split.png)
+
 ## What it is
 
 Two ways to work:
 
-- **Split** — raw markdown on the left, rendered preview on the right.
+- **Split** — raw markdown on the left, rendered preview on the right. That's the window above.
 - **Live** — one surface. Click any paragraph to reveal its markdown, click away to render it again.
+  Only the paragraph you're in is markdown; everything around it stays a document.
+
+![Live view: one paragraph showing its markdown while the rest of the document stays rendered](docs/live.png)
 
 Everything else stays out of the way until you ask for it: a command palette (`⌘K`) instead of a
 toolbar, zen mode, focus mode, typewriter scrolling, a style checker, local version history, tables
