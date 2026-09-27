@@ -159,6 +159,15 @@ window that is owned by something else still releases itself when it closes unle
 to, and it was being released twice. Neither is reachable with one window, which is why neither had
 ever happened.
 
+A third fault came out of taking screenshots for the README, which is its own
+argument for taking them. Every page comes up with the welcome document already in it — the web
+layer puts it there at load, so that a window is never briefly blank — and with one window that was
+invisible, because the session replaced it or it was the thing to show. ⌘N made it a second page,
+and a new window greeted somebody who had used the app for a month with a wall of text to delete
+before they could write. The same launch path also handed it back on every launch that happened to
+have no session behind it. A new window now comes up empty, and the welcome document is shown once
+on a fresh install and remembered.
+
 A shortcut the menu advertised was worse than missing: ⌃Tab reached the page instead of the Window
 menu, so it indented the line and marked the document unsaved rather than switching tabs. A view
 gets first refusal on a key equivalent and WKWebView takes Tab; `EditorWebView.performKeyEquivalent`

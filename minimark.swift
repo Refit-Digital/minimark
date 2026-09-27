@@ -403,6 +403,12 @@ let kActiveTabKey = "activeTabIndex"
 /// back as zero, which is the only window there was.
 let kFrontWindowKey = "frontWindowIndex"
 
+/// Whether the welcome document has ever been on screen. It is a greeting, not
+/// a template: it belongs on the first launch of a fresh install and nowhere
+/// else, and without this every launch that happens to have no session behind
+/// it hands the writer a wall of text to delete before they can start.
+let kWelcomeShownKey = "welcomeShown"
+
 /// The base name a window's remembered frame is saved under. The first window
 /// uses it as it stands, so a frame saved by any earlier build is still the
 /// first window's; the second and later ones number off it. See freeFrameName.
@@ -3487,16 +3493,48 @@ final class Editor: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNaviga
         switch firstShow {
         // The session is the app's, so the app is what reads it and what makes
         // the other windows it names. This window takes the first share of it.
+        // Nothing to restore means this is the moment the welcome document is
+        // for — once.
         case .launch:
-            app.restoreSession(into: self)
+            if !app.restoreSession(into: self) { greetOrBlank() }
         case .restoring(let seats, let front):
             restore(seats, front: front)
-        // One empty untitled document, which is the tab above. Nothing else to
-        // do, and nothing to record: an untitled document nobody has typed in
-        // is not in the session.
+        // One empty untitled document. The tab is the one above; what has to be
+        // said is that it is EMPTY, because every page comes up showing the
+        // welcome document and only the launch has a reason to leave it there.
         case .blank:
-            break
+            blankFirstDocument()
         }
+    }
+
+    /// Take the welcome document off the screen, leaving the empty untitled
+    /// document the writer asked for.
+    ///
+    /// Every page comes up with the welcome text in it — the web layer puts it
+    /// there at load, before the shell has said anything, so that a window is
+    /// never briefly blank and so that a launch with nothing to restore has
+    /// something to show. That made sense while there was one window and one
+    /// page. A second window is a second page, and it came up greeting somebody
+    /// who has been using the app for a month, with text they then had to
+    /// select and delete before they could write. loadDoc with empty text is
+    /// what the comment in openInitialDocuments warns would wipe the welcome
+    /// document, which here is the entire point.
+    private func blankFirstDocument() {
+        guard let tab = activeTab else { return }
+        js("if(window.App)App.loadDoc(\"\",\(jsLiteral(tab.name)),\(jsLiteral(tab.dir)),\(tab.id))")
+    }
+
+    /// The first launch of a fresh install gets the welcome document; every
+    /// launch after it gets an empty page, whether or not there was a session
+    /// to come back to.
+    ///
+    /// Recorded the first time it is shown rather than the first time the app
+    /// runs, because a launch that opens a file from Finder never puts it on
+    /// screen, and somebody who has not seen it yet should still get it.
+    private func greetOrBlank() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: kWelcomeShownKey) else { blankFirstDocument(); return }
+        defaults.set(true, forKey: kWelcomeShownKey)
     }
 
     // ------------------------------------------------------------------

@@ -646,6 +646,33 @@ try {
   }
 
   {
+    // Every page comes up with the welcome document already in it — the web
+    // layer puts it there at load so a window is never briefly blank. With one
+    // window that was invisible; with ⌘N it meant a second window greeting
+    // somebody who has used the app for a month, with text they then had to
+    // select and delete before they could write in it.
+    const init = body('    private func openInitialDocuments()');
+    ok('a window somebody asked for comes up empty, not greeting them',
+       /case \.blank:\s*\n\s*blankFirstDocument\(\)/.test(init));
+    ok('and the launch is the only thing that may leave the welcome up',
+       /case \.launch:[\s\S]*?greetOrBlank\(\)/.test(init));
+
+    const blank = body('    private func blankFirstDocument()');
+    ok('blanking is loadDoc with empty text, which is what clears the page',
+       /App\.loadDoc\(\\"\\"/.test(blank));
+
+    // A greeting, not a template. Without the flag, every launch that happened
+    // to have no session behind it handed back the wall of text again.
+    const greet = body('    private func greetOrBlank()');
+    ok('the welcome document is shown once and remembered',
+       greet.includes('kWelcomeShownKey')
+       && /guard !defaults\.bool\(forKey: kWelcomeShownKey\)/.test(greet)
+       && /defaults\.set\(true, forKey: kWelcomeShownKey\)/.test(greet));
+    ok('…and every launch after it comes up empty',
+       /else \{ blankFirstDocument\(\); return \}/.test(greet));
+  }
+
+  {
     const as = body('    func saveAs(');
     ok('Save As refuses a name something else in the app already has open',
        as.includes('app.openTab(for:'));
