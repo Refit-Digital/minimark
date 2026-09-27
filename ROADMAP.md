@@ -28,21 +28,22 @@ or tells them a thing that is not true.
 
 ## Tier 2 — friction a writer meets, or a claim the app cannot keep
 
-### 1. Whether to hand anyone a build — a decision, not a task
+### 1. ~~Whether to hand anyone a build~~ — answered: source-only
 
-`build/minimark.app` is ad-hoc signed: `Signature=adhoc`, `TeamIdentifier=not set`, and
-`spctl --assess --type execute` returns **rejected**. macOS refuses a copy that arrives from anywhere
-else and calls the app damaged, which is a worse message than "unsigned" and sends people looking for
-a fault that is not there. There are no releases, and the README now says all of this and points at
-`./build.sh`, which works with nothing but the command line tools.
+Answered on 27 September: **minimark stays source-only.** Notarising costs an Apple Developer
+subscription every year, and the reach it buys is not worth it for this.
 
-So nothing is untrue, and this is a choice about reach rather than a defect:
+So there are no releases and there will not be any. `build/minimark.app` is ad-hoc signed —
+`Signature=adhoc`, `TeamIdentifier=not set`, `spctl --assess --type execute` returns **rejected** —
+and macOS calls a copy that arrives from anywhere else *damaged*, which sends people hunting a fault
+that is not there. Nobody should ever be handed one.
 
-- **Stay source-only.** Costs nothing. Anyone who can clone can build.
-- **Notarize.** A Developer ID certificate and a notarising step in `build.sh`, and then a download
-  works for strangers. Costs the Apple Developer Program yearly.
+What replaces it is being findable and being easy to build on, which is a writing job rather than a
+signing one: the README says plainly why there is no download, what the two halves of the app are,
+where the bridge between them is, and how the tests prove they are still testing something. That is
+the whole of the distribution story, and it is done.
 
-Only the second one makes item 6 below matter.
+This also closes item 6 below, which only mattered if the answer here had been "notarize".
 
 ### 2. Version history is shared between windows, and the last write wins
 
@@ -88,11 +89,11 @@ do not coordinate, so between that check and the swap there is a window no lock 
 narrow and it is inherent; the kernel watch and the content digest mean the app notices afterwards
 rather than never. Worth knowing, not worth chasing.
 
-### 6. No way to find out there is a new version
+### 6. ~~No way to find out there is a new version~~ — closed by item 1
 
-The Help menu has two items: Markdown Reference and Acknowledgements. There is no Check for Updates,
-which is the right call while the only distribution is `git pull && ./build.sh`. It becomes a real
-gap the day item 1 is answered with "notarize".
+There is no Check for Updates in the Help menu, and now there should not be: with no releases to
+check for, the only update is `git pull && ./build.sh`, and anyone doing that already knows. Closed
+on 27 September along with item 1.
 
 ---
 

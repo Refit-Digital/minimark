@@ -2,43 +2,85 @@
 
 A quiet place to write markdown, for macOS.
 
+No toolbar, no sidebar, no sign-in, no subscription, no telemetry. One window with your words in it,
+and everything else a keystroke away when you want it.
+
 ## What it is
 
-minimark is a native markdown editor with two ways to work:
+Two ways to work:
 
 - **Split** — raw markdown on the left, rendered preview on the right.
 - **Live** — one surface. Click any paragraph to reveal its markdown, click away to render it again.
 
-Everything else stays out of the way until you ask for it: a command palette (`⌘K`) instead of a toolbar, zen mode, focus mode, typewriter scrolling, a style checker, local version history, and `[[wikilinks]]` between your own files. Paste a web page and it arrives as clean markdown; paste an image and it's saved beside your document.
+Everything else stays out of the way until you ask for it: a command palette (`⌘K`) instead of a
+toolbar, zen mode, focus mode, typewriter scrolling, a style checker, local version history, tables
+you can add and remove rows and columns from where the caret already is, and `[[wikilinks]]` between
+your own files. Paste a web page and it arrives as clean markdown; paste an image and it's saved
+beside your document.
 
-Documents autosave a second after you stop typing, and reload if something else changes the file underneath you.
+`⌘N` opens a window, `⌘T` a tab. One file is only ever open in one place — ask for a document
+another window already has and that window comes forward rather than handing you a second copy of it
+to lose work in.
+
+Documents autosave a second after you stop typing. If something else changes a file underneath you,
+minimark notices; if that would mean overwriting somebody else's work, it refuses, says so, and
+keeps both versions rather than picking for you.
+
+Requires macOS 13 or later. Apple Silicon and Intel.
+
+## There is no download, on purpose
+
+Handing someone a build that opens without a warning means a paid Apple Developer certificate and a
+notarising step. This project does not have one and is not going to buy one, so the honest options
+were "ship something macOS calls damaged" or "ship source". It ships source.
+
+So: no releases, no installer, no auto-update. Building it takes one command and nothing beyond the
+Xcode command line tools, and the result is a real, signed-for-this-machine app you can keep in
+`/Applications`.
 
 ## Building
 
-Requires the Xcode command line tools (`xcode-select --install`) — no Xcode project, no dependencies beyond `swiftc`.
-
 ```bash
+xcode-select --install   # once, if you have never built anything on this Mac
 ./build.sh
 ```
 
-This compiles `minimark.swift` for both Apple Silicon and Intel, lipos them into a universal binary, and produces:
+That compiles `minimark.swift` for both architectures, lipos them into a universal binary, signs it
+ad-hoc, and produces:
 
-- `minimark.app` — the bundle in this repo. Its `Resources/` are the real source files, so editing `app.js`, `ui.js`, or `styles.css` shows up on next launch without rebuilding.
+- `minimark.app` — the bundle in this repo, for working in. Its `Resources/` are the real source
+  files, so editing `app.js`, `ui.js` or `styles.css` shows up on next launch without rebuilding.
 - `build/minimark.app` — a self-contained copy, with the Resources folded in.
 
-Neither is committed; a fresh clone is meant to build both from scratch.
-
-Both are signed ad-hoc, which is enough to run on the machine that built them and not enough to send anywhere. macOS refuses a copy that arrives from somewhere else — downloaded, AirDropped, or unzipped from a release — and says the app is damaged rather than that it is unsigned. Handing someone a build means a Developer ID certificate and notarising it, which this project does not have. So the way to get minimark is to build it: the command above, and nothing beyond the command line tools.
-
-## Running
+Neither is committed; a fresh clone builds both from scratch.
 
 ```bash
 open minimark.app
 ```
 
-## Testing
+## If you want to build on it
 
-The web layer (`Contents/Resources/*.js`) is tested with Playwright; a few suites compile pieces of `minimark.swift` itself into throwaway binaries to test file I/O and filename handling directly, since that logic can't run in a browser.
+The whole app is two halves and one string-typed bridge between them, and knowing that is most of
+finding your way around.
+
+| Where | What |
+| --- | --- |
+| `minimark.swift` | The entire native shell in one file, ~7,500 lines: window, menus, file I/O, autosave, file coordination, the WebKit bridge. One file deliberately — everything that touches the filesystem is in one place you can read end to end. |
+| `minimark.app/Contents/Resources/app.js` | The editor: document state, markdown parsing, the live view, tables, history. |
+| `minimark.app/Contents/Resources/ui.js` | The chrome: command palette, tab strip, themes, find, preferences. |
+| `minimark.app/Contents/Resources/styles.css` | Everything you see. Themes are CSS variables. |
+| `tools/` | Seventeen test suites and the bridge-contract checker. |
+
+**The bridge is the thing to be careful about.** Every message between the two halves is a string
+matched at runtime, so a `send('tabNew')` with no `case "tabNew"` on the Swift side does nothing and
+says nothing about it. `node tools/bridge-contract.js` greps both sides and diffs them. Run it
+before you believe a rename worked.
+
+**The tests run the real code, not a copy of it.** The Swift suites compile named functions straight
+out of `minimark.swift` by balancing braces, so they cannot pass against a stale extract; the web
+suites drive the actual page in Playwright. Every suite takes a source path as its argument, which
+is how you point one at a deliberately broken copy and check it still fails — a test that has
+quietly stopped testing anything reports success.
 
 ```bash
 cd tools
@@ -46,20 +88,22 @@ npm install --include=dev
 npm test
 ```
 
-Individual suites are also runnable on their own — see `tools/package.json` for the full list.
+Individual suites run on their own — `npm run coordination`, `npm run windows`, `npm run palette`
+and the rest; see `tools/package.json`.
 
-## Project layout
+**Read `ROADMAP.md` before proposing anything.** It says what is missing and, more usefully, what
+was tried and rejected and why. The code has the same habit: where a decision looks strange there is
+usually a comment saying what the obvious alternative did when it was measured.
 
-| Path | What it is |
-| --- | --- |
-| `minimark.swift` | The entire native shell: window, menus, file I/O, autosave, the WebKit bridge. One file, deliberately. |
-| `minimark.app/Contents/Resources/` | The web layer: `index.html`, `app.js` (editor/document logic), `ui.js` (chrome, menus, themes), `styles.css`, and vendored libraries. |
-| `build.sh` | Compiles, lipos, and signs. The only supported build path. |
-| `tools/` | Test suites and the bridge-contract checker that keeps the Swift and JS sides honest about the messages they pass each other. |
+Issues and pull requests are welcome. So is a fork that goes somewhere else with it.
 
 ## Acknowledgements
 
-minimark is built on [marked](https://github.com/markedjs/marked), [Turndown](https://github.com/mixmark-io/turndown), [highlight.js](https://github.com/highlightjs/highlight.js), and [KaTeX](https://github.com/KaTeX/KaTeX) — see Help ▸ Acknowledgements in the app, or [NOTICES](NOTICES) for full license text.
+minimark is built on [marked](https://github.com/markedjs/marked),
+[Turndown](https://github.com/mixmark-io/turndown),
+[highlight.js](https://github.com/highlightjs/highlight.js), and
+[KaTeX](https://github.com/KaTeX/KaTeX) — see Help ▸ Acknowledgements in the app, or
+[NOTICES](NOTICES) for full license text.
 
 ## License
 
