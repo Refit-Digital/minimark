@@ -23,6 +23,11 @@ you can add and remove rows and columns from where the caret already is, and `[[
 your own files. Paste a web page and it arrives as clean markdown; paste an image and it's saved
 beside your document.
 
+There is no toolbar because there is a key for everything, and `⌘/` is the map of them — the
+markdown syntax on top, every shortcut the app has underneath.
+
+![The markdown reference sheet: syntax on top, every keyboard shortcut underneath](docs/reference.png)
+
 Six themes, five typefaces and a text size that remembers where you put it. `⌘,` opens this, and
 nothing here needs a preferences window.
 
