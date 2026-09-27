@@ -673,6 +673,23 @@ try {
   }
 
   {
+    // "The window in front" stops being obvious with more than one window. A
+    // menu command issued while nothing is key — the app in the background, a
+    // panel or menu holding key, a sheet up — used to fall straight through to
+    // whichever window was made first, which after a ⌘N is the one the writer
+    // is not looking at. Help ▸ Markdown Reference opening the reference sheet
+    // in the other window is what this was found by.
+    const front = extract('    var front: Editor?');
+    ok('the window in front is the key one first',
+       /isKeyWindow == true/.test(front));
+    ok('…then the frontmost document window, for when nothing is key',
+       /isMainWindow == true/.test(front)
+       && front.search(/isKeyWindow/) < front.search(/isMainWindow/));
+    ok('…and only then does the order windows were made in decide',
+       front.search(/isMainWindow/) < front.lastIndexOf('editors.first'));
+  }
+
+  {
     const as = body('    func saveAs(');
     ok('Save As refuses a name something else in the app already has open',
        as.includes('app.openTab(for:'));

@@ -168,6 +168,12 @@ before they could write. The same launch path also handed it back on every launc
 have no session behind it. A new window now comes up empty, and the welcome document is shown once
 on a fresh install and remembered.
 
+A fourth, found while setting that screenshot up: a menu command issued while no window was key —
+the app in the background, a panel or a menu holding key, a sheet up — fell through to whichever
+window was made first, which after a ⌘N is the one the writer is not looking at. Help ▸ Markdown
+Reference opened the reference sheet in the other window. "The window in front" is now the key
+window, then the frontmost document window, and only then the order they were made in.
+
 A shortcut the menu advertised was worse than missing: ⌃Tab reached the page instead of the Window
 menu, so it indented the line and marked the document unsaved rather than switching tabs. A view
 gets first refusal on a key equivalent and WKWebView takes Tab; `EditorWebView.performKeyEquivalent`

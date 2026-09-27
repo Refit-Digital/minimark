@@ -5559,10 +5559,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate,
     var editors: [Editor] = []
 
     /// The window a menu command, a palette entry or a recent document means:
-    /// the one in front. The fallback is what keeps this answering during the
-    /// moments there is no key window — a launch before the first window has
-    /// become key, a sheet up somewhere, the app not active at all.
-    var front: Editor? { editors.first { $0.window?.isKeyWindow == true } ?? editors.first }
+    /// the one in front.
+    ///
+    /// Three answers, in order, because "in front" stops being obvious the
+    /// moment there is more than one window. The key window is the real one.
+    /// The main window is the frontmost DOCUMENT window, which is still right
+    /// when nothing is key — the app is not active, a panel or a menu has taken
+    /// key, a sheet is up — and that gap is not theoretical: a command issued
+    /// while the app is in the background used to land in whichever window
+    /// happened to have been made first, which after a ⌘N is the one the writer
+    /// is not looking at. Only when neither exists does order decide, and then
+    /// only so that a launch before the first window is key still has somewhere
+    /// to send things.
+    var front: Editor? {
+        editors.first { $0.window?.isKeyWindow == true }
+            ?? editors.first { $0.window?.isMainWindow == true }
+            ?? editors.first
+    }
 
     /// Paths whose documents have been asked for and not arrived. A read is
     /// unbounded, so there is a real stretch of time between wanting a document
